@@ -69,8 +69,7 @@ export default function App({ controller = defaultController }: AppProps) {
       controller.setDrive(wheels.left, wheels.right)
     }
     const keyDown = (event: KeyboardEvent): void => {
-      const target = event.target as HTMLElement | null
-      if (target?.matches('input, select, textarea')) return
+      if (event.target instanceof Element && event.target.matches('input, select, textarea')) return
       const key = event.key.toLowerCase()
       if (key === ' ') {
         event.preventDefault()
@@ -420,4 +419,3 @@ export default function App({ controller = defaultController }: AppProps) {
     </div>
   )
 }
-

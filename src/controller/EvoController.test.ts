@@ -33,6 +33,7 @@ describe('EvoController', () => {
     await controller.emergencyStop()
     const stop = transport.writes.findLast((write) => readMessageId(write.data) === 120)
     expect(stop?.options?.priority).toBe(true)
+    expect(new DataView(stop!.data.buffer, stop!.data.byteOffset, stop!.data.byteLength).getUint32(2, true)).toBe(0)
     expect(controller.snapshot.phase).toBe('ready')
     expect(controller.snapshot.wheels).toEqual({ left: 0, right: 0 })
     await controller.disconnect()
@@ -71,4 +72,3 @@ describe('EvoController', () => {
     await controller.disconnect()
   })
 })
-

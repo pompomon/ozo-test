@@ -58,7 +58,6 @@ export class ModernEvoClient {
   private unsubscribe: () => void
   private memoryChain: Promise<void> = Promise.resolve()
   private noIdChain: Promise<void> = Promise.resolve()
-  private movementRequestId?: number
   private soundRequestId?: number
 
   constructor(
@@ -93,7 +92,6 @@ export class ModernEvoClient {
     const linear = (left + right) / 2
     const angular = (right - left) / WHEEL_TRACK_METERS
     const requestId = this.nextRequestId()
-    this.movementRequestId = requestId
     const packet = encodeVelocity(requestId, linear, angular, durationMs)
     const response = await this.request(
       packet,
@@ -107,9 +105,7 @@ export class ModernEvoClient {
 
   async stopMovement(): Promise<void> {
     this.transport.clearQueued('movement')
-    const requestId = this.movementRequestId ?? 0
-    this.movementRequestId = undefined
-    await this.stopExecution(requestId, true)
+    await this.stopExecution(0, true)
   }
 
   async setLed(mask: number, red: number, green: number, blue: number): Promise<void> {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 interface BeforeInstallPromptEvent extends Event {
   prompt(): Promise<void>
@@ -16,6 +16,7 @@ export function usePwa(motorsArmed: boolean): PwaState {
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent>()
   const [registration, setRegistration] = useState<ServiceWorkerRegistration>()
   const [updateAvailable, setUpdateAvailable] = useState(false)
+  const reloadForUpdate = useRef(false)
 
   useEffect(() => {
     const capturePrompt = (event: Event): void => {
@@ -29,6 +30,10 @@ export function usePwa(motorsArmed: boolean): PwaState {
   useEffect(() => {
     if (!('serviceWorker' in navigator)) return
     let disposed = false
+    const activateUpdate = (): void => {
+      if (reloadForUpdate.current) window.location.reload()
+    }
+    navigator.serviceWorker.addEventListener('controllerchange', activateUpdate)
     const watchRegistration = (next: ServiceWorkerRegistration): void => {
       if (disposed) return
       setRegistration(next)
@@ -45,6 +50,7 @@ export function usePwa(motorsArmed: boolean): PwaState {
     void navigator.serviceWorker.register('./sw.js').then(watchRegistration).catch(() => undefined)
     return () => {
       disposed = true
+      navigator.serviceWorker.removeEventListener('controllerchange', activateUpdate)
     }
   }, [])
 
@@ -57,6 +63,7 @@ export function usePwa(motorsArmed: boolean): PwaState {
 
   const applyUpdate = useCallback((): void => {
     if (motorsArmed) return
+    reloadForUpdate.current = true
     registration?.waiting?.postMessage({ type: 'SKIP_WAITING' })
     setUpdateAvailable(false)
   }, [motorsArmed, registration])
@@ -68,4 +75,3 @@ export function usePwa(motorsArmed: boolean): PwaState {
     applyUpdate,
   }
 }
-

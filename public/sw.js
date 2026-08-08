@@ -1,12 +1,14 @@
 const CACHE_PREFIX = 'evo-control-'
-const CACHE_NAME = `${CACHE_PREFIX}v1`
+const CACHE_NAME = `${CACHE_PREFIX}__BUILD_ID__`
 const scopeUrl = new URL('./', self.registration.scope).href
+const BUILD_ASSETS = []
 const APP_SHELL = [
   scopeUrl,
   new URL('manifest.webmanifest', scopeUrl).href,
   new URL('favicon.svg', scopeUrl).href,
   new URL('icon.svg', scopeUrl).href,
   new URL('icon-maskable.svg', scopeUrl).href,
+  ...BUILD_ASSETS.map((asset) => new URL(asset, scopeUrl).href),
 ]
 
 self.addEventListener('install', (event) => {
@@ -62,4 +64,3 @@ self.addEventListener('fetch', (event) => {
     ),
   )
 })
-
