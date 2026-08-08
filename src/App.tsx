@@ -280,6 +280,7 @@ export default function App({ controller = defaultController }: AppProps) {
                   onChange={(event) => updateWheel(side, Number(event.target.value))}
                   onPointerUp={() => releaseWheel(side)}
                   onPointerCancel={() => releaseWheel(side)}
+                  onKeyUp={() => releaseWheel(side)}
                   onBlur={() => releaseWheel(side)}
                 />
               </div>
@@ -407,7 +408,7 @@ export default function App({ controller = defaultController }: AppProps) {
 
       <button
         className="emergency-stop"
-        disabled={!connected}
+        disabled={!connected && snapshot.phase !== 'error'}
         onClick={() => run(() => controller.emergencyStop())}
         onKeyDown={(event: ReactKeyboardEvent<HTMLButtonElement>) => {
           if (event.key === ' ') event.preventDefault()

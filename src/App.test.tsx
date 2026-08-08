@@ -35,6 +35,12 @@ describe('Evo Control UI', () => {
     })
     fireEvent.keyUp(window, { key: 'w' })
 
+    const leftWheel = screen.getByRole('slider', { name: 'Left' })
+    fireEvent.change(leftWheel, { target: { value: '50' } })
+    expect(leftWheel).toHaveValue('50')
+    fireEvent.keyUp(leftWheel, { key: 'ArrowRight' })
+    expect(leftWheel).toHaveValue('0')
+
     fireEvent.click(screen.getByRole('button', { name: 'Emergency stop' }))
     await screen.findByRole('button', { name: 'Arm motors' })
   })
@@ -59,5 +65,18 @@ describe('Evo Control UI', () => {
     expect(screen.getByRole('heading', { name: 'Lights' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Sound' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Telemetry' })).toBeInTheDocument()
+  })
+
+  it('keeps emergency stop available in an error state', async () => {
+    const transport = new FakeTransport(EVO_3_PROFILE, createModernResponder())
+    const controller = new EvoController(transport)
+    controllers.push(controller)
+    render(<App controller={controller} />)
+
+    transport.simulateDisconnect()
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Emergency stop' })).toBeEnabled()
+    })
   })
 })

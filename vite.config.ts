@@ -4,6 +4,14 @@ import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { defineConfig } from 'vitest/config'
 
+const EXPLICIT_SHELL_ASSETS = new Set([
+  'index.html',
+  'manifest.webmanifest',
+  'favicon.svg',
+  'icon.svg',
+  'icon-maskable.svg',
+])
+
 function filesBelow(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name)
@@ -24,7 +32,7 @@ export default defineConfig({
         const outputFiles = filesBelow(outputDirectory).filter((path) => path !== workerPath)
         const assets = outputFiles
           .map((path) => relative(outputDirectory, path).split('\\').join('/'))
-          .filter((path) => path !== 'index.html')
+          .filter((path) => !EXPLICIT_SHELL_ASSETS.has(path))
           .sort()
         const hash = createHash('sha256')
         for (const path of outputFiles.sort()) {
