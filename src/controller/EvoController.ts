@@ -232,11 +232,26 @@ export class EvoController {
 
   async disarm(): Promise<void> {
     if (this.snapshotValue.phase !== 'armed') return
-    await this.stopMotion()
+    let stopFailure: string | undefined
+    try {
+      await this.stopMotion()
+    } catch (error) {
+      stopFailure = errorMessage(error)
+      this.log('error', `Stop command failed while disarming: ${stopFailure}`)
+    }
     this.lock.release()
     await this.releaseWakeLock()
-    this.patch({ phase: 'ready', wheels: { left: 0, right: 0 } })
-    this.log('info', 'Motors disarmed')
+    this.patch({
+      phase: stopFailure ? 'error' : 'ready',
+      error: stopFailure
+        ? 'The stop command was not acknowledged. Keep Evo clear and reconnect before driving.'
+        : undefined,
+      wheels: { left: 0, right: 0 },
+    })
+    this.log(
+      stopFailure ? 'warning' : 'info',
+      stopFailure ? 'Motor controls locked after stop failure' : 'Motors disarmed',
+    )
   }
 
   setMaximumSpeed(speed: number): void {
@@ -270,18 +285,26 @@ export class EvoController {
 
   async emergencyStop(reason = 'Emergency stop pressed'): Promise<void> {
     const wasArmed = this.snapshotValue.phase === 'armed'
+    let stopFailure: string | undefined
     this.targetWheels = { left: 0, right: 0 }
     this.driveGeneration += 1
     this.transport.clearQueued('movement')
     try {
       await this.stopMotion()
     } catch (error) {
-      this.log('error', `Stop command failed: ${errorMessage(error)}`)
+      stopFailure = errorMessage(error)
+      this.log('error', `Stop command failed: ${stopFailure}`)
     }
     this.lock.release()
     await this.releaseWakeLock()
     if (wasArmed && this.transport.connected) {
-      this.patch({ phase: 'ready', wheels: { left: 0, right: 0 } })
+      this.patch({
+        phase: stopFailure ? 'error' : 'ready',
+        error: stopFailure
+          ? 'The emergency stop was not acknowledged. Keep Evo clear and reconnect before driving.'
+          : undefined,
+        wheels: { left: 0, right: 0 },
+      })
     }
     this.log('warning', reason)
   }

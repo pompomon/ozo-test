@@ -62,6 +62,28 @@ describe('EvoController', () => {
     })
   })
 
+  it('locks controls if a disarm stop is not acknowledged', async () => {
+    let failStops = false
+    const responder = createModernResponder()
+    const transport = new FakeTransport(EVO_3_PROFILE, async (write, fake) => {
+      if (failStops && readMessageId(write.data) === 120) {
+        throw new Error('Simulated stop failure')
+      }
+      await responder(write, fake)
+    })
+    const controller = new EvoController(transport)
+    await controller.connect()
+    await controller.arm()
+    failStops = true
+    await controller.disarm()
+    expect(controller.snapshot).toMatchObject({
+      phase: 'error',
+      wheels: { left: 0, right: 0 },
+    })
+    expect(controller.snapshot.error).toContain('not acknowledged')
+    await controller.disconnect()
+  })
+
   it('redacts the selected device name from exported diagnostics', async () => {
     const transport = new FakeTransport(EVO_3_PROFILE, createModernResponder())
     const controller = new EvoController(transport)
