@@ -133,6 +133,55 @@ describe('ModernEvoClient', () => {
     }
   })
 
+  it('starts the movement acknowledgment timeout after the write completes', async () => {
+    vi.useFakeTimers()
+    try {
+      const transport = new FakeTransport(undefined, async (write, fake) => {
+        await new Promise((resolve) => setTimeout(resolve, 250))
+        const request = new DataView(write.data.buffer, write.data.byteOffset, write.data.byteLength)
+        const response = new Uint8Array(6)
+        const responseView = new DataView(response.buffer)
+        responseView.setUint16(0, 105, true)
+        responseView.setUint32(2, request.getUint32(2, true), true)
+        setTimeout(() => fake.emit(response), 250)
+      })
+      await transport.connect()
+      const client = new ModernEvoClient(transport, () => undefined, { movementTimeoutMs: 300 })
+      clients.push(client)
+      const movement = client.setWheels(120, 120, 250)
+      await vi.advanceTimersByTimeAsync(501)
+      await expect(movement).resolves.toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not classify a movement write deadline as an acknowledgment timeout', async () => {
+    vi.useFakeTimers()
+    try {
+      const transport = new FakeTransport(undefined, () => new Promise(() => undefined))
+      await transport.connect()
+      const client = new ModernEvoClient(transport, () => undefined, { movementTimeoutMs: 300 })
+      clients.push(client)
+      const movement = client.setWheels(120, 120, 250)
+      const assertion = expect(movement).rejects.not.toBeInstanceOf(MovementTimeoutError)
+      await vi.advanceTimersByTimeAsync(301)
+      await assertion
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not emit diagnostics for successful movement lifecycle events', async () => {
+    const diagnostics: string[] = []
+    const transport = new FakeTransport(undefined, createModernResponder())
+    await transport.connect()
+    const client = new ModernEvoClient(transport, (message) => diagnostics.push(message))
+    clients.push(client)
+    await client.setWheels(100, 100, 250)
+    expect(diagnostics).toEqual([])
+  })
+
   it('classifies queued movement replacement as superseded instead of timeout', async () => {
     const transport = new FakeTransport(undefined, async (write, fake) => {
       if (readMessageId(write.data) === 104) {

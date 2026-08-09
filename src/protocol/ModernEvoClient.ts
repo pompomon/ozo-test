@@ -38,9 +38,7 @@ import {
 interface PendingRequest {
   readonly resolve: (packet: Uint8Array) => void
   readonly reject: (error: Error) => void
-  readonly timer: ReturnType<typeof setTimeout>
-  readonly startedAt: number
-  readonly label: string
+  timer: ReturnType<typeof setTimeout>
 }
 
 const WHEEL_TRACK_METERS = 0.023
@@ -71,6 +69,13 @@ class RequestTimeoutError extends Error {
     this.name = 'RequestTimeoutError'
     this.responseMessageId = metadata.responseMessageId
     this.requestId = metadata.requestId
+  }
+}
+
+class RequestWriteTimeoutError extends Error {
+  constructor(label: string) {
+    super(`Timed out sending Evo ${label}`)
+    this.name = 'RequestWriteTimeoutError'
   }
 }
 
@@ -148,7 +153,6 @@ export class ModernEvoClient {
     const angular = (right - left) / WHEEL_TRACK_METERS
     const requestId = this.nextRequestId()
     const packet = encodeVelocity(requestId, linear, angular, durationMs)
-    this.diagnostic(`Movement request ${requestId} enqueued`)
     try {
       const response = await this.request(
         packet,
@@ -159,7 +163,6 @@ export class ModernEvoClient {
         'movement',
       )
       this.assertRequestResponse(response, MODERN_MESSAGE.velocityResponse, requestId)
-      this.diagnostic(`Movement response 105 received for request ${requestId}`)
     } catch (error) {
       if (
         error instanceof TransportQueueCancelledError &&
@@ -336,19 +339,26 @@ export class ModernEvoClient {
       const timer = setTimeout(() => {
         this.pending.delete(key)
         this.diagnostic(
-          `${label} timeout waiting for response ${responseMessageId} after ${Date.now() - startedAt} ms` +
+          `${label} timeout waiting to send after ${Date.now() - startedAt} ms` +
             (requestId ? ` (request ${requestId})` : ''),
         )
-        reject(new RequestTimeoutError({ responseMessageId, requestId }))
+        reject(new RequestWriteTimeoutError(label))
       }, timeoutMs)
-      this.pending.set(key, { resolve, reject, timer, startedAt, label })
+      this.pending.set(key, { resolve, reject, timer })
       void this.transport
         .write(packet, 'control', writeOptions)
         .then(() => {
-          this.diagnostic(
-            `${label} write sent in ${Date.now() - startedAt} ms` +
-              (requestId ? ` (request ${requestId})` : ''),
-          )
+          const pending = this.pending.get(key)
+          if (!pending) return
+          clearTimeout(pending.timer)
+          pending.timer = setTimeout(() => {
+            this.pending.delete(key)
+            this.diagnostic(
+              `${label} timeout waiting for response ${responseMessageId} after ${timeoutMs} ms` +
+                (requestId ? ` (request ${requestId})` : ''),
+            )
+            pending.reject(new RequestTimeoutError({ responseMessageId, requestId }))
+          }, timeoutMs)
         })
         .catch((error: unknown) => {
           const pending = this.pending.get(key)
@@ -376,10 +386,6 @@ export class ModernEvoClient {
         this.diagnostic(`Ignored unsolicited protocol message ${messageId}`)
         return
       }
-      this.diagnostic(
-        `${pending.label} response ${messageId} received in ${Date.now() - pending.startedAt} ms` +
-          (requestId ? ` (request ${requestId})` : ''),
-      )
       clearTimeout(pending.timer)
       this.pending.delete(key)
       pending.resolve(packet.slice())

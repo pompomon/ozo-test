@@ -217,7 +217,11 @@ describe('WebBluetoothTransport', () => {
 
     release.done?.()
     await write1
-    await expect(superseded).rejects.toBeInstanceOf(TransportQueueCancelledError)
+    await expect(superseded).rejects.toMatchObject({
+      name: TransportQueueCancelledError.name,
+      reason: 'replaced',
+      replaceKey: 'movement',
+    })
     await expect(kept).resolves.toBeUndefined()
     await transport.disconnect()
   })
