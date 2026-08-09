@@ -1,5 +1,9 @@
 import { LEGACY_STOP_FILE, encodeLegacyDrive, encodeLegacyLed } from '../protocol/legacyCodec.ts'
-import { ModernEvoClient } from '../protocol/ModernEvoClient.ts'
+import {
+  isMovementSupersededError,
+  isMovementTimeoutError,
+  ModernEvoClient,
+} from '../protocol/ModernEvoClient.ts'
 import {
   isFullyCompatible,
   missingCapabilities,
@@ -49,6 +53,7 @@ type SnapshotHandler = (snapshot: ControllerSnapshot) => void
 
 const DRIVE_REFRESH_MS = 100
 const DRIVE_WATCHDOG_MS = 250
+const DRIVE_TIMEOUT_FAILSAFE_THRESHOLD = 2
 const TELEMETRY_REFRESH_MS = 2_000
 
 function delay(milliseconds: number): Promise<void> {
@@ -367,6 +372,7 @@ export class EvoController {
     if (this.driveLoopActive || !this.client) return
     this.driveLoopActive = true
     const generation = ++this.driveGeneration
+    let consecutiveTimeouts = 0
     try {
       while (
         this.snapshotValue.phase === 'armed' &&
@@ -377,7 +383,26 @@ export class EvoController {
           this.targetWheels,
           this.snapshotValue.maximumSpeed,
         )
-        await this.client.setWheels(wheels.left, wheels.right, DRIVE_WATCHDOG_MS)
+        try {
+          await this.client.setWheels(wheels.left, wheels.right, DRIVE_WATCHDOG_MS)
+          consecutiveTimeouts = 0
+        } catch (error) {
+          if (isMovementSupersededError(error)) {
+            continue
+          }
+          if (isMovementTimeoutError(error)) {
+            consecutiveTimeouts += 1
+            this.log(
+              'warning',
+              `Drive acknowledgment timeout (${consecutiveTimeouts}/${DRIVE_TIMEOUT_FAILSAFE_THRESHOLD})`,
+            )
+            if (consecutiveTimeouts < DRIVE_TIMEOUT_FAILSAFE_THRESHOLD) {
+              await delay(DRIVE_REFRESH_MS)
+              continue
+            }
+          }
+          throw error
+        }
         await delay(DRIVE_REFRESH_MS)
       }
     } catch (error) {

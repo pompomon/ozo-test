@@ -97,6 +97,8 @@ The official driver sends `StopExecution(0)` as soon as it opens the control cha
 5. Clear pending movement and prioritize stop on release, focus loss, page hiding, disconnect, disarm, or emergency stop.
 6. Never replay a command or restore arming after reconnecting.
 
+Movement acknowledgments (`Velocity` response `105`) now use movement-specific timeout handling: one transient timeout is tolerated with an immediate retry, and two consecutive misses trigger an emergency stop path.
+
 Browser suspension can prevent a final stop packet. Release therefore depends on the bounded command expiring on the robot; this remains a hardware release check.
 
 ## Compatibility matrix
@@ -110,4 +112,3 @@ Browser suspension can prevent a final stop packet. Release therefore depends on
 ## Required physical follow-up
 
 Capture the selected Evo’s advertisement, GATT service tree, firmware value, and responses without publishing its device ID or Bluetooth address. Compare every result with this document and update confidence only after completing [`hardware-validation.md`](hardware-validation.md).
-

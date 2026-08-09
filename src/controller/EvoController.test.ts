@@ -39,6 +39,53 @@ describe('EvoController', () => {
     await controller.disconnect()
   })
 
+  it('recovers from a single transient drive 105 timeout while staying armed', async () => {
+    vi.useFakeTimers()
+    try {
+      let movementRequests = 0
+      const responder = createModernResponder()
+      const transport = new FakeTransport(EVO_3_PROFILE, async (write, fake) => {
+        if (readMessageId(write.data) === 104) {
+          movementRequests += 1
+          if (movementRequests === 1) return
+        }
+        await responder(write, fake)
+      })
+      const controller = new EvoController(transport)
+      await controller.connect()
+      await controller.arm()
+      controller.setDrive(1, 1)
+      await vi.advanceTimersByTimeAsync(2_300)
+      expect(transport.writes.filter((write) => readMessageId(write.data) === 104).length).toBeGreaterThan(1)
+      expect(controller.snapshot.phase).toBe('armed')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('escalates to safe stop after repeated drive 105 timeouts', async () => {
+    vi.useFakeTimers()
+    try {
+      const responder = createModernResponder()
+      const transport = new FakeTransport(EVO_3_PROFILE, async (write, fake) => {
+        if (readMessageId(write.data) === 104) return
+        await responder(write, fake)
+      })
+      const controller = new EvoController(transport)
+      await controller.connect()
+      await controller.arm()
+      controller.setDrive(1, 1)
+      await vi.advanceTimersByTimeAsync(4_300)
+      expect(controller.snapshot.phase).toBe('ready')
+      const diagnostics = controller.exportDiagnostics()
+      expect(diagnostics).toContain('Drive acknowledgment timeout (1/2)')
+      expect(diagnostics).toContain('Drive acknowledgment timeout (2/2)')
+      expect(diagnostics).toContain('Drive communication failed')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('never enables motors for the incomplete legacy profile', async () => {
     const transport = new FakeTransport(LEGACY_PROFILE)
     const controller = new EvoController(transport)
