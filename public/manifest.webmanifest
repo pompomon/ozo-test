@@ -1,0 +1,28 @@
+{
+  "name": "Evo Control",
+  "short_name": "Evo Control",
+  "description": "A private, touch-first Bluetooth controller for Ozobot Evo.",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0c0f16",
+  "theme_color": "#151923",
+  "categories": ["education", "utilities"],
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "./icon-maskable.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}
+

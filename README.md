@@ -1,1 +1,82 @@
-# ozo-test
+# Evo Control
+
+A touch-first, installable web controller for Ozobot Evo. It connects directly through Web Bluetooth; commands, telemetry, and device identifiers are not sent to a backend.
+
+> [!WARNING]
+> The protocol implementation is based on public source code but has not yet been validated with this project's physical Evo. Test movement with the wheels lifted and complete the [hardware checklist](docs/hardware-validation.md) before normal use.
+
+## Browser support
+
+| Platform | Browser | Status |
+| --- | --- | --- |
+| Android | Current Chrome | Primary target |
+| Windows 10/11 | Current Chrome or Edge | Secondary target |
+| iPhone/iPad | Safari, Chrome, Edge | Unsupported: iOS does not expose Web Bluetooth |
+| Firefox/Safari desktop | Any | Unsupported |
+
+The site must run on HTTPS or `localhost`. Selecting a device must follow a user action, so the browser picker cannot be bypassed.
+
+## Features
+
+- Touch joystick, independent dead-man wheel sliders, and WASD/arrow keyboard control
+- Explicit motor arming, a persistent emergency stop, bounded 250 ms movement commands, and stop-on-focus-loss
+- Eight-LED selection, RGB color, and brightness
+- Tone playback and stop-sound control
+- Battery, firmware, IR, color, line, surface, odometry, encoder, charger, and button telemetry
+- Capability detection for the official Evo 3.x RPC service
+- Detection and safe rejection of an incomplete legacy protocol
+- Local, redacted diagnostics with copy/export
+- Offline PWA app shell; connection and armed state are never cached or restored
+
+## Use
+
+1. Open the deployed HTTPS site in a supported browser.
+2. Turn on Evo and keep it close to the device.
+3. Select **Choose Evo** and choose a device named `OzoEvo…`.
+4. Confirm the firmware and battery values look plausible.
+5. Put Evo on a stand with its wheels clear.
+6. Select **Arm motors**, then test at the default 120 mm/s limit.
+7. Use **Emergency stop** or the Space key whenever control is uncertain.
+
+If the app detects the legacy service, update Evo using the official Ozobot application and reconnect. The legacy profile lacks verified sound and telemetry commands, so this app deliberately keeps its motors locked.
+
+## Development
+
+Requires Node.js 22 or newer.
+
+```sh
+npm ci
+npm run dev
+```
+
+Available checks:
+
+```sh
+npm run lint
+npm test
+npm run build
+```
+
+Desktop Chrome can use Web Bluetooth from the Vite `localhost` URL. A phone accessing a development machine by LAN IP needs an HTTPS development endpoint; a plain `http://192.168…` URL is not a secure context.
+
+## Deploy
+
+The workflow in `.github/workflows/pages.yml` verifies pull requests and deploys `main` to GitHub Pages. In repository settings, set **Pages → Build and deployment → Source** to **GitHub Actions**.
+
+The Vite build uses relative asset paths, so it works at both a custom domain and a repository subpath. A service-worker update waits for explicit confirmation and cannot be applied while motors are armed.
+
+## Safety and limitations
+
+- Browsers cannot guarantee a final BLE write when a page is killed or a phone suspends it. Movement is refreshed as short, expiring commands so Evo should stop after at most 250 ms if the documented firmware watchdog works.
+- The app sends `StopExecution(0)` immediately after connecting and never restores armed state.
+- A Web Lock prevents two tabs from arming on supported browsers.
+- The screen wake lock is best-effort and does not replace supervision.
+- No firmware update mechanism is implemented.
+- Named audio assets use a larger RPC format and are not enabled; the app uses the verified short `PlayTone` command.
+
+See [protocol provenance](docs/protocol.md) for confidence levels and [hardware validation](docs/hardware-validation.md) for the required release checks.
+
+## License
+
+[MIT](LICENSE)
+
