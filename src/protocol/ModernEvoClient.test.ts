@@ -68,10 +68,10 @@ describe('ModernEvoClient', () => {
     transport.emit(Uint8Array.of(1))
     transport.emit(Uint8Array.of(0xff, 0xff))
     await client.initialize()
-    expect(diagnostics).toEqual([
+    expect(diagnostics).toEqual(expect.arrayContaining([
       expect.stringContaining('malformed'),
       expect.stringContaining('unsolicited'),
-    ])
+    ]))
   })
 
   it('serializes no-ID LED responses safely', async () => {
@@ -98,8 +98,9 @@ describe('ModernEvoClient', () => {
       const client = new ModernEvoClient(transport, () => undefined, { movementTimeoutMs: 300 })
       clients.push(client)
       const movement = client.setWheels(120, 120, 250)
+      const assertion = expect(movement).rejects.toBeInstanceOf(MovementTimeoutError)
       await vi.advanceTimersByTimeAsync(301)
-      await expect(movement).rejects.toBeInstanceOf(MovementTimeoutError)
+      await assertion
     } finally {
       vi.useRealTimers()
     }

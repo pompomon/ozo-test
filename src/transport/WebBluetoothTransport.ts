@@ -8,15 +8,15 @@ import {
   MODERN_SERVICE_UUID,
   type ProtocolProfile,
 } from '../protocol/profile.ts'
-import type {
-  DisconnectHandler,
-  EvoTransport,
-  PacketHandler,
-  TransportQueueCancelReason,
-  TransportChannel,
-  TransportConnection,
+import {
   TransportQueueCancelledError,
-  TransportWriteOptions,
+  type DisconnectHandler,
+  type EvoTransport,
+  type PacketHandler,
+  type TransportQueueCancelReason,
+  type TransportChannel,
+  type TransportConnection,
+  type TransportWriteOptions,
 } from './EvoTransport.ts'
 
 interface WriteTask {
@@ -72,10 +72,13 @@ export class WebBluetoothTransport implements EvoTransport {
   private writeQueue: WriteTask[] = []
   private writing = false
   private intentionalDisconnect = false
+  private readonly diagnostic: (message: string) => void
 
   connection?: TransportConnection
 
-  constructor(private readonly diagnostic: (message: string) => void = () => undefined) {}
+  constructor(diagnostic: (message: string) => void = () => undefined) {
+    this.diagnostic = diagnostic
+  }
 
   get connected(): boolean {
     return this.server?.connected === true && this.connection !== undefined
