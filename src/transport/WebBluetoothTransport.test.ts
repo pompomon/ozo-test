@@ -6,6 +6,7 @@ import {
   MODERN_CONTROL_UUID,
   MODERN_SERVICE_UUID,
 } from '../protocol/profile.ts'
+import { TransportQueueCancelledError } from './EvoTransport.ts'
 import { WebBluetoothTransport, webBluetoothSupport } from './WebBluetoothTransport.ts'
 
 class FakeCharacteristic extends EventTarget implements BluetoothRemoteGATTCharacteristic {
@@ -190,5 +191,34 @@ describe('WebBluetoothTransport', () => {
     expect([...drive.writes[0]]).toEqual([0x40])
     await transport.disconnect()
   })
-})
 
+  it('rejects superseded queued movement writes with a cancellation error', async () => {
+    const { device, characteristic } = modernDevice()
+    const release: { done?: () => void } = {}
+    const originalWrite = characteristic.writeValueWithoutResponse.bind(characteristic)
+    let blockFirstWrite = true
+    characteristic.writeValueWithoutResponse = async (value: BufferSource): Promise<void> => {
+      if (blockFirstWrite) {
+        blockFirstWrite = false
+        await new Promise<void>((resolve) => {
+          release.done = resolve
+        })
+      }
+      await originalWrite(value)
+    }
+    setBluetooth({ requestDevice: () => Promise.resolve(device) })
+    const transport = new WebBluetoothTransport()
+    await transport.connect()
+
+    const write1 = transport.write(Uint8Array.of(0x01), 'control')
+    const superseded = transport.write(Uint8Array.of(0x02), 'control', { replaceKey: 'movement' })
+    const kept = transport.write(Uint8Array.of(0x03), 'control', { replaceKey: 'movement' })
+    await Promise.resolve()
+
+    release.done?.()
+    await write1
+    await expect(superseded).rejects.toBeInstanceOf(TransportQueueCancelledError)
+    await expect(kept).resolves.toBeUndefined()
+    await transport.disconnect()
+  })
+})

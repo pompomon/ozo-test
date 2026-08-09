@@ -1,4 +1,8 @@
-import type { EvoTransport, TransportWriteOptions } from '../transport/EvoTransport.ts'
+import {
+  TransportQueueCancelledError,
+  type EvoTransport,
+  type TransportWriteOptions,
+} from '../transport/EvoTransport.ts'
 import {
   assertCallSucceeded,
   decodeMemReadResponse,
@@ -35,10 +39,13 @@ interface PendingRequest {
   readonly resolve: (packet: Uint8Array) => void
   readonly reject: (error: Error) => void
   readonly timer: ReturnType<typeof setTimeout>
+  readonly startedAt: number
+  readonly label: string
 }
 
 const WHEEL_TRACK_METERS = 0.023
 const MAX_MEMORY_RESPONSE_DATA = 15
+const DEFAULT_MOVEMENT_TIMEOUT_MS = 2_000
 
 function responseKey(messageId: number, requestId?: number): string {
   return `${messageId}:${requestId ?? 'single'}`
@@ -50,6 +57,51 @@ function asError(value: unknown): Error {
 
 export type DiagnosticHandler = (message: string) => void
 
+interface RequestTimeoutMetadata {
+  readonly responseMessageId: number
+  readonly requestId?: number
+}
+
+class RequestTimeoutError extends Error {
+  readonly responseMessageId: number
+  readonly requestId?: number
+
+  constructor(metadata: RequestTimeoutMetadata) {
+    super(`Timed out waiting for Evo response ${metadata.responseMessageId}`)
+    this.name = 'RequestTimeoutError'
+    this.responseMessageId = metadata.responseMessageId
+    this.requestId = metadata.requestId
+  }
+}
+
+export class MovementTimeoutError extends Error {
+  readonly requestId: number
+
+  constructor(requestId: number) {
+    super(`Timed out waiting for Evo velocity response 105 (request ${requestId})`)
+    this.name = 'MovementTimeoutError'
+    this.requestId = requestId
+  }
+}
+
+export class MovementSupersededError extends Error {
+  readonly requestId: number
+
+  constructor(requestId: number) {
+    super(`Movement request ${requestId} was superseded before send`)
+    this.name = 'MovementSupersededError'
+    this.requestId = requestId
+  }
+}
+
+export function isMovementTimeoutError(error: unknown): error is MovementTimeoutError {
+  return error instanceof MovementTimeoutError
+}
+
+export function isMovementSupersededError(error: unknown): error is MovementSupersededError {
+  return error instanceof MovementSupersededError
+}
+
 export class ModernEvoClient {
   private readonly transport: EvoTransport
   private readonly diagnostic: DiagnosticHandler
@@ -59,14 +111,17 @@ export class ModernEvoClient {
   private memoryChain: Promise<void> = Promise.resolve()
   private noIdChain: Promise<void> = Promise.resolve()
   private soundRequestId?: number
+  private readonly movementTimeoutMs: number
 
   constructor(
     transport: EvoTransport,
     diagnostic: DiagnosticHandler = () => undefined,
+    options: { movementTimeoutMs?: number } = {},
   ) {
     this.transport = transport
     this.diagnostic = diagnostic
     this.unsubscribe = transport.subscribe(this.handlePacket)
+    this.movementTimeoutMs = Math.max(200, options.movementTimeoutMs ?? DEFAULT_MOVEMENT_TIMEOUT_MS)
   }
 
   async initialize(): Promise<void> {
@@ -93,14 +148,34 @@ export class ModernEvoClient {
     const angular = (right - left) / WHEEL_TRACK_METERS
     const requestId = this.nextRequestId()
     const packet = encodeVelocity(requestId, linear, angular, durationMs)
-    const response = await this.request(
-      packet,
-      MODERN_MESSAGE.velocityResponse,
-      requestId,
-      { replaceKey: 'movement' },
-      1_500,
-    )
-    this.assertRequestResponse(response, MODERN_MESSAGE.velocityResponse, requestId)
+    this.diagnostic(`Movement request ${requestId} enqueued`)
+    try {
+      const response = await this.request(
+        packet,
+        MODERN_MESSAGE.velocityResponse,
+        requestId,
+        { replaceKey: 'movement' },
+        this.movementTimeoutMs,
+        'movement',
+      )
+      this.assertRequestResponse(response, MODERN_MESSAGE.velocityResponse, requestId)
+      this.diagnostic(`Movement response 105 received for request ${requestId}`)
+    } catch (error) {
+      if (
+        error instanceof TransportQueueCancelledError &&
+        error.replaceKey === 'movement' &&
+        ['replaced', 'cleared'].includes(error.reason)
+      ) {
+        throw new MovementSupersededError(requestId)
+      }
+      if (
+        error instanceof RequestTimeoutError &&
+        error.responseMessageId === MODERN_MESSAGE.velocityResponse
+      ) {
+        throw new MovementTimeoutError(requestId)
+      }
+      throw error
+    }
   }
 
   async stopMovement(): Promise<void> {
@@ -250,24 +325,38 @@ export class ModernEvoClient {
     requestId?: number,
     writeOptions?: TransportWriteOptions,
     timeoutMs = 2_500,
+    label = 'request',
   ): Promise<Uint8Array> {
     const key = responseKey(responseMessageId, requestId)
     if (this.pending.has(key)) {
       return Promise.reject(new Error(`A request for response ${key} is already pending`))
     }
+    const startedAt = Date.now()
     return new Promise<Uint8Array>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(key)
-        reject(new Error(`Timed out waiting for Evo response ${responseMessageId}`))
+        this.diagnostic(
+          `${label} timeout waiting for response ${responseMessageId} after ${Date.now() - startedAt} ms` +
+            (requestId ? ` (request ${requestId})` : ''),
+        )
+        reject(new RequestTimeoutError({ responseMessageId, requestId }))
       }, timeoutMs)
-      this.pending.set(key, { resolve, reject, timer })
-      void this.transport.write(packet, 'control', writeOptions).catch((error: unknown) => {
-        const pending = this.pending.get(key)
-        if (!pending) return
-        clearTimeout(pending.timer)
-        this.pending.delete(key)
-        pending.reject(asError(error))
-      })
+      this.pending.set(key, { resolve, reject, timer, startedAt, label })
+      void this.transport
+        .write(packet, 'control', writeOptions)
+        .then(() => {
+          this.diagnostic(
+            `${label} write sent in ${Date.now() - startedAt} ms` +
+              (requestId ? ` (request ${requestId})` : ''),
+          )
+        })
+        .catch((error: unknown) => {
+          const pending = this.pending.get(key)
+          if (!pending) return
+          clearTimeout(pending.timer)
+          this.pending.delete(key)
+          pending.reject(asError(error))
+        })
     })
   }
 
@@ -287,6 +376,10 @@ export class ModernEvoClient {
         this.diagnostic(`Ignored unsolicited protocol message ${messageId}`)
         return
       }
+      this.diagnostic(
+        `${pending.label} response ${messageId} received in ${Date.now() - pending.startedAt} ms` +
+          (requestId ? ` (request ${requestId})` : ''),
+      )
       clearTimeout(pending.timer)
       this.pending.delete(key)
       pending.resolve(packet.slice())

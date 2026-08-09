@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { FakeTransport, createModernResponder } from '../test/FakeTransport.ts'
-import { ModernEvoClient } from './ModernEvoClient.ts'
+import { TransportQueueCancelledError } from '../transport/EvoTransport.ts'
+import { ModernEvoClient, MovementSupersededError, MovementTimeoutError } from './ModernEvoClient.ts'
 import { readMessageId } from './modernCodec.ts'
 
 const clients: ModernEvoClient[] = []
@@ -84,5 +85,63 @@ describe('ModernEvoClient', () => {
     ])
     expect(transport.writes.map((write) => readMessageId(write.data))).toEqual([110, 110])
   })
-})
 
+  it('classifies a missing 105 acknowledgment as a movement timeout', async () => {
+    vi.useFakeTimers()
+    try {
+      const responder = createModernResponder()
+      const transport = new FakeTransport(undefined, async (write, fake) => {
+        if (readMessageId(write.data) === 104) return
+        await responder(write, fake)
+      })
+      await transport.connect()
+      const client = new ModernEvoClient(transport, () => undefined, { movementTimeoutMs: 300 })
+      clients.push(client)
+      const movement = client.setWheels(120, 120, 250)
+      await vi.advanceTimersByTimeAsync(301)
+      await expect(movement).rejects.toBeInstanceOf(MovementTimeoutError)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('accepts delayed 105 acknowledgments within the movement timeout budget', async () => {
+    vi.useFakeTimers()
+    try {
+      const responder = createModernResponder()
+      const transport = new FakeTransport(undefined, async (write, fake) => {
+        if (readMessageId(write.data) !== 104) {
+          await responder(write, fake)
+          return
+        }
+        const view = new DataView(write.data.buffer, write.data.byteOffset, write.data.byteLength)
+        const response = new Uint8Array(6)
+        const responseView = new DataView(response.buffer)
+        responseView.setUint16(0, 105, true)
+        responseView.setUint32(2, view.getUint32(2, true), true)
+        setTimeout(() => fake.emit(response), 250)
+      })
+      await transport.connect()
+      const client = new ModernEvoClient(transport, () => undefined, { movementTimeoutMs: 400 })
+      clients.push(client)
+      const movement = client.setWheels(120, 120, 250)
+      await vi.advanceTimersByTimeAsync(251)
+      await expect(movement).resolves.toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('classifies queued movement replacement as superseded instead of timeout', async () => {
+    const transport = new FakeTransport(undefined, async (write, fake) => {
+      if (readMessageId(write.data) === 104) {
+        throw new TransportQueueCancelledError('replaced', 'movement')
+      }
+      await createModernResponder()(write, fake)
+    })
+    await transport.connect()
+    const client = new ModernEvoClient(transport)
+    clients.push(client)
+    await expect(client.setWheels(80, 80, 250)).rejects.toBeInstanceOf(MovementSupersededError)
+  })
+})

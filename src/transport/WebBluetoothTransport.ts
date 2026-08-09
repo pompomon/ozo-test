@@ -12,8 +12,10 @@ import type {
   DisconnectHandler,
   EvoTransport,
   PacketHandler,
+  TransportQueueCancelReason,
   TransportChannel,
   TransportConnection,
+  TransportQueueCancelledError,
   TransportWriteOptions,
 } from './EvoTransport.ts'
 
@@ -21,6 +23,7 @@ interface WriteTask {
   readonly data: Uint8Array
   readonly channel: TransportChannel
   readonly replaceKey?: string
+  readonly enqueuedAt: number
   readonly resolve: () => void
   readonly reject: (error: Error) => void
 }
@@ -71,6 +74,8 @@ export class WebBluetoothTransport implements EvoTransport {
   private intentionalDisconnect = false
 
   connection?: TransportConnection
+
+  constructor(private readonly diagnostic: (message: string) => void = () => undefined) {}
 
   get connected(): boolean {
     return this.server?.connected === true && this.connection !== undefined
@@ -142,6 +147,7 @@ export class WebBluetoothTransport implements EvoTransport {
         data: data.slice(),
         channel,
         replaceKey: options.replaceKey,
+        enqueuedAt: Date.now(),
         resolve,
         reject,
       }
@@ -150,17 +156,20 @@ export class WebBluetoothTransport implements EvoTransport {
       } else {
         this.writeQueue.push(task)
       }
+      if (options.replaceKey === 'movement') {
+        this.diagnostic(`Movement write enqueued; queue depth ${this.writeQueue.length}`)
+      }
       void this.drainWrites()
     })
   }
 
   clearQueued(replaceKey?: string): void {
     if (replaceKey) {
-      this.removeQueued(replaceKey)
+      this.removeQueued(replaceKey, 'cleared')
       return
     }
     for (const task of this.writeQueue.splice(0)) {
-      task.resolve()
+      task.reject(new TransportQueueCancelledError('cleared', task.replaceKey))
     }
   }
 
@@ -225,7 +234,13 @@ export class WebBluetoothTransport implements EvoTransport {
           if (!characteristic || !this.connected) {
             throw new Error(`The Evo ${task.channel} characteristic is unavailable`)
           }
+          if (task.replaceKey === 'movement') {
+            this.diagnostic(`Movement write dequeued; queue depth ${this.writeQueue.length}`)
+          }
           await this.writeCharacteristic(characteristic, task.data)
+          if (task.replaceKey === 'movement') {
+            this.diagnostic(`Movement write sent in ${Date.now() - task.enqueuedAt} ms`)
+          }
           task.resolve()
         } catch (error) {
           task.reject(toError(error, 'Bluetooth write failed'))
@@ -252,11 +267,14 @@ export class WebBluetoothTransport implements EvoTransport {
     await characteristic.writeValue(value)
   }
 
-  private removeQueued(replaceKey: string): void {
+  private removeQueued(
+    replaceKey: string,
+    reason: TransportQueueCancelReason = 'replaced',
+  ): void {
     const retained: WriteTask[] = []
     for (const task of this.writeQueue) {
       if (task.replaceKey === replaceKey) {
-        task.resolve()
+        task.reject(new TransportQueueCancelledError(reason, replaceKey))
       } else {
         retained.push(task)
       }

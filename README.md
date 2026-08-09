@@ -68,6 +68,7 @@ The Vite build uses relative asset paths, so it works at both a custom domain an
 ## Safety and limitations
 
 - Browsers cannot guarantee a final BLE write when a page is killed or a phone suspends it. Movement is refreshed as short, expiring commands so Evo should stop after at most 250 ms if the documented firmware watchdog works.
+- Movement requests track `Velocity` acknowledgments (`105`) with bounded timeouts; one transient miss is retried and repeated misses trigger a fail-safe stop.
 - The app sends `StopExecution(0)` immediately after connecting and never restores armed state.
 - A Web Lock prevents two tabs from arming on supported browsers.
 - The screen wake lock is best-effort and does not replace supervision.
@@ -79,4 +80,3 @@ See [protocol provenance](docs/protocol.md) for confidence levels and [hardware 
 ## License
 
 [MIT](LICENSE)
-
