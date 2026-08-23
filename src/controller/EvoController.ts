@@ -9,7 +9,7 @@ import {
   missingCapabilities,
   type ProtocolProfile,
 } from '../protocol/profile.ts'
-import type { EvoTelemetry } from '../protocol/telemetry.ts'
+import type { EvoTelemetry, ReactiveSensors } from '../protocol/telemetry.ts'
 import { ControlLock } from '../safety/ControlLock.ts'
 import type { EvoTransport } from '../transport/EvoTransport.ts'
 import { WebBluetoothTransport, webBluetoothSupport } from '../transport/WebBluetoothTransport.ts'
@@ -50,11 +50,14 @@ export interface ControllerSnapshot {
 }
 
 type SnapshotHandler = (snapshot: ControllerSnapshot) => void
+export type ReactiveSensorHandler = (sensors: ReactiveSensors) => void
+export type ReactiveSensorErrorHandler = (error: Error) => void
 
 const DRIVE_REFRESH_MS = 100
 const DRIVE_WATCHDOG_MS = 250
 const DRIVE_TIMEOUT_FAILSAFE_THRESHOLD = 2
 const TELEMETRY_REFRESH_MS = 2_000
+const MIN_REACTIVE_SENSOR_INTERVAL_MS = 100
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
@@ -75,7 +78,10 @@ export class EvoController {
   private client?: ModernEvoClient
   private wakeLock?: WakeLockSentinel
   private telemetryTimer?: ReturnType<typeof setInterval>
+  private reactiveSensorTimer?: ReturnType<typeof setTimeout>
+  private reactiveSensorGeneration = 0
   private telemetryInFlight = false
+  private sensorReadChain: Promise<void> = Promise.resolve()
   private driveLoopActive = false
   private driveGeneration = 0
   private targetWheels: WheelSpeeds = { left: 0, right: 0 }
@@ -195,6 +201,7 @@ export class EvoController {
       await this.emergencyStop('Disconnect requested')
     }
     this.stopTelemetry()
+    this.stopReactiveSensorPolling()
     this.client?.dispose()
     this.client = undefined
     await this.transport.disconnect()
@@ -237,6 +244,7 @@ export class EvoController {
 
   async disarm(): Promise<void> {
     if (this.snapshotValue.phase !== 'armed') return
+    this.stopReactiveSensorPolling()
     let stopFailure: string | undefined
     try {
       await this.stopMotion()
@@ -253,6 +261,7 @@ export class EvoController {
         : undefined,
       wheels: { left: 0, right: 0 },
     })
+    if (!stopFailure) this.startTelemetry()
     this.log(
       stopFailure ? 'warning' : 'info',
       stopFailure ? 'Motor controls locked after stop failure' : 'Motors disarmed',
@@ -290,6 +299,7 @@ export class EvoController {
 
   async emergencyStop(reason = 'Emergency stop pressed'): Promise<void> {
     const wasArmed = this.snapshotValue.phase === 'armed'
+    this.stopReactiveSensorPolling()
     let stopFailure: string | undefined
     this.targetWheels = { left: 0, right: 0 }
     this.driveGeneration += 1
@@ -310,6 +320,7 @@ export class EvoController {
           : undefined,
         wheels: { left: 0, right: 0 },
       })
+      if (!stopFailure) this.startTelemetry()
     }
     this.log('warning', reason)
   }
@@ -342,15 +353,93 @@ export class EvoController {
   }
 
   async refreshTelemetry(): Promise<void> {
-    if (!this.client || this.telemetryInFlight || !this.transport.connected) return
+    const client = this.client
+    if (!client || this.telemetryInFlight || !this.transport.connected) return
     this.telemetryInFlight = true
     try {
-      const telemetry = await this.client.readTelemetry()
+      const telemetry = await this.runSensorRead(() => client.readTelemetry())
+      if (this.client !== client || !this.transport.connected) return
       this.patch({ telemetry, firmware: telemetry.firmware })
     } catch (error) {
       this.log('warning', `Telemetry refresh failed: ${errorMessage(error)}`)
     } finally {
       this.telemetryInFlight = false
+    }
+  }
+
+  async readReactiveSensors(): Promise<ReactiveSensors> {
+    const client = this.client
+    if (!client || !this.transport.connected) {
+      throw new Error('Evo is not connected')
+    }
+    const sensors = await this.runSensorRead(() => client.readReactiveSensors())
+    if (this.client !== client || !this.transport.connected) {
+      throw new Error('Evo disconnected during sensor sampling')
+    }
+    return sensors
+  }
+
+  async startReactiveSensorPolling(
+    handler: ReactiveSensorHandler,
+    onError: ReactiveSensorErrorHandler,
+    intervalMs: number,
+  ): Promise<() => void> {
+    if (this.snapshotValue.phase !== 'armed' || !this.client || !this.transport.connected) {
+      throw new Error('Arm Evo before starting reactive sensor polling')
+    }
+    if (!Number.isFinite(intervalMs)) {
+      throw new TypeError('Reactive sensor interval must be finite')
+    }
+    const interval = Math.max(MIN_REACTIVE_SENSOR_INTERVAL_MS, Math.round(intervalMs))
+    this.stopTelemetry()
+    this.stopReactiveSensorPolling()
+    const generation = this.reactiveSensorGeneration
+
+    const poll = async (): Promise<void> => {
+      if (generation !== this.reactiveSensorGeneration) return
+      try {
+        handler(await this.readReactiveSensors())
+      } catch (error) {
+        if (generation === this.reactiveSensorGeneration && this.transport.connected) {
+          onError(error instanceof Error ? error : new Error(errorMessage(error)))
+        }
+      } finally {
+        if (
+          generation === this.reactiveSensorGeneration &&
+          this.snapshotValue.phase === 'armed' &&
+          this.transport.connected
+        ) {
+          this.reactiveSensorTimer = setTimeout(() => {
+            void poll()
+          }, interval)
+        }
+      }
+    }
+
+    try {
+      handler(await this.readReactiveSensors())
+    } catch (error) {
+      if (generation === this.reactiveSensorGeneration) {
+        this.stopReactiveSensorPolling()
+        if (this.client && this.transport.connected) this.startTelemetry()
+      }
+      throw error
+    }
+    if (
+      generation !== this.reactiveSensorGeneration ||
+      this.snapshotValue.phase !== 'armed' ||
+      !this.transport.connected
+    ) {
+      throw new Error('Reactive sensor polling was interrupted')
+    }
+    this.reactiveSensorTimer = setTimeout(() => {
+      void poll()
+    }, interval)
+
+    return () => {
+      if (generation !== this.reactiveSensorGeneration) return
+      this.stopReactiveSensorPolling()
+      if (this.client && this.transport.connected) this.startTelemetry()
     }
   }
 
@@ -439,8 +528,15 @@ export class EvoController {
     this.telemetryTimer = undefined
   }
 
+  private stopReactiveSensorPolling(): void {
+    this.reactiveSensorGeneration += 1
+    if (this.reactiveSensorTimer) clearTimeout(this.reactiveSensorTimer)
+    this.reactiveSensorTimer = undefined
+  }
+
   private handleUnexpectedDisconnect(reason?: Error): void {
     this.stopTelemetry()
+    this.stopReactiveSensorPolling()
     this.driveGeneration += 1
     this.targetWheels = { left: 0, right: 0 }
     this.client?.dispose()
@@ -465,6 +561,15 @@ export class EvoController {
     if (lock && !lock.released) {
       await lock.release()
     }
+  }
+
+  private runSensorRead<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.sensorReadChain.then(operation, operation)
+    this.sensorReadChain = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    return result
   }
 
   private log(level: DiagnosticEntry['level'], message: string): void {
