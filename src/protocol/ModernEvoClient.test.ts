@@ -59,6 +59,36 @@ describe('ModernEvoClient', () => {
     ])
   })
 
+  it('reads only the focused reactive sensor regions', async () => {
+    const transport = new FakeTransport(undefined, createModernResponder({
+      113: [1, 9, 0, 0, 0],
+      118: [4, 80, 3, 70, 10, 0, 0, 0],
+      196: [0, 11, 0, 0, 0],
+    }))
+    await transport.connect()
+    const client = new ModernEvoClient(transport)
+    clients.push(client)
+    const sensors = await client.readReactiveSensors()
+    expect(sensors.proximity).toMatchObject({
+      leftRear: 4,
+      leftFront: 80,
+      rightRear: 3,
+      rightFront: 70,
+    })
+    expect(sensors.pickup).toEqual({ pickedUp: true, timestamp: 9 })
+    expect(sensors.button).toEqual({ press: 'Short', timestamp: 11 })
+
+    const reads = transport.writes.map((write) => {
+      const view = new DataView(write.data.buffer, write.data.byteOffset, write.data.byteLength)
+      return { address: view.getUint32(2, true), length: view.getUint16(6, true) }
+    })
+    expect(reads).toEqual([
+      { address: 118, length: 8 },
+      { address: 113, length: 5 },
+      { address: 196, length: 5 },
+    ])
+  })
+
   it('rejects unsolicited malformed notifications without breaking later requests', async () => {
     const diagnostics: string[] = []
     const transport = new FakeTransport(undefined, createModernResponder())

@@ -45,12 +45,12 @@ describe('Evo Control UI', () => {
     await screen.findByRole('button', { name: 'Arm motors' })
   })
 
-  it('shows an actionable firmware update requirement for legacy Evo', async () => {
+  it('shows an actionable unsupported profile message for legacy Evo', async () => {
     const controller = new EvoController(new FakeTransport(LEGACY_PROFILE))
     controllers.push(controller)
     render(<App controller={controller} />)
     fireEvent.click(screen.getByRole('button', { name: 'Choose Evo' }))
-    await screen.findByText('Firmware update required')
+    await screen.findByText('Unsupported firmware')
     expect(screen.getByText(/Missing sound, battery, firmware, telemetry/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Arm motors' })).toBeDisabled()
   })
@@ -65,6 +65,35 @@ describe('Evo Control UI', () => {
     expect(screen.getByRole('heading', { name: 'Lights' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Sound' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Telemetry' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Autonomous behavior' })).toBeInTheDocument()
+  })
+
+  it('gives autonomous behavior exclusive control until manual mode is restored', async () => {
+    const transport = new FakeTransport(EVO_3_PROFILE, createModernResponder())
+    const controller = new EvoController(transport)
+    controllers.push(controller)
+    render(<App controller={controller} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Choose Evo' }))
+    await screen.findByText('Connected · safe')
+    fireEvent.click(screen.getByRole('button', { name: 'Arm motors' }))
+    const enablePersonality = await screen.findByRole('button', { name: 'Enable personality' })
+    await waitFor(() => expect(enablePersonality).toBeEnabled())
+    fireEvent.click(enablePersonality)
+    await screen.findByText('Autonomous')
+
+    expect(screen.getByRole('application', { name: 'Drive joystick' }))
+      .toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByRole('button', { name: 'Apply lights' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Dance' })).toBeEnabled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Return to manual' }))
+    await screen.findByText('Manual control')
+    await waitFor(() => {
+      expect(screen.getByRole('application', { name: 'Drive joystick' }))
+        .toHaveAttribute('aria-disabled', 'false')
+    })
+    expect(screen.getByRole('button', { name: 'Apply lights' })).toBeEnabled()
   })
 
   it('keeps emergency stop available in an error state', async () => {

@@ -113,6 +113,9 @@ export function createBehaviorConfig(overrides: Partial<BehaviorConfig> = {}): B
   if (config.sleepAfterMs <= config.boredAfterMs) {
     throw new RangeError('sleepAfterMs must be greater than boredAfterMs')
   }
+  if (config.sensorStaleMs <= config.reactiveSensorIntervalMs) {
+    throw new RangeError('sensorStaleMs must be greater than reactiveSensorIntervalMs')
+  }
   if (config.ambientMaxWaitMs < config.ambientMinWaitMs) {
     throw new RangeError('ambientMaxWaitMs must be at least ambientMinWaitMs')
   }

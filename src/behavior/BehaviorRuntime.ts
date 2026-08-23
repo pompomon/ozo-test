@@ -45,6 +45,9 @@ export class BehaviorRuntime {
   private stopReactivePolling?: () => void
   private tickTimer?: ReturnType<typeof setTimeout>
   private eventChain: Promise<void> = Promise.resolve()
+  private startupEvents: BehaviorEvent[] = []
+  private lifecycleGeneration = 0
+  private disablePromise?: Promise<void>
   private disposed = false
 
   constructor(controller: EvoController, options: BehaviorRuntimeOptions = {}) {
@@ -89,8 +92,10 @@ export class BehaviorRuntime {
       throw new Error('Arm Evo before enabling its personality')
     }
 
+    const generation = ++this.lifecycleGeneration
     this.patch({ status: 'starting', error: undefined })
     this.eventSource.reset(this.clock.now())
+    this.startupEvents = []
     try {
       await this.controller.stopMotion()
       await this.controller.stopSound()
@@ -102,7 +107,11 @@ export class BehaviorRuntime {
         () => this.handleSensorReadFailure(),
         this.config.reactiveSensorIntervalMs,
       )
-      if (this.controller.snapshot.phase !== 'armed' || this.snapshotValue.status !== 'starting') {
+      if (
+        generation !== this.lifecycleGeneration ||
+        this.controller.snapshot.phase !== 'armed' ||
+        this.snapshotValue.status !== 'starting'
+      ) {
         this.stopReactivePolling()
         this.stopReactivePolling = undefined
         throw new Error('Personality mode was interrupted while starting')
@@ -117,7 +126,10 @@ export class BehaviorRuntime {
       })
       this.scheduleTick()
       this.applyDecision(decision)
+      for (const event of this.startupEvents.splice(0)) this.enqueueEvent(event)
     } catch (error) {
+      if (generation !== this.lifecycleGeneration) throw error
+      this.patch({ status: 'stopping', error: messageOf(error) })
       this.stopAutonomyInputs()
       this.engine.stop()
       try {
@@ -125,27 +137,35 @@ export class BehaviorRuntime {
       } catch {
         // The original startup failure remains the actionable error.
       }
-      await this.controller.emergencyStop('Personality mode could not start')
-      const message = messageOf(error)
-      this.patch({ status: 'faulted', state: 'IDLE', error: message })
+      let message = messageOf(error)
+      try {
+        await this.controller.emergencyStop('Personality mode could not start')
+      } catch (stopError) {
+        message = `${message}; stop failed: ${messageOf(stopError)}`
+      }
+      if (generation === this.lifecycleGeneration) {
+        this.patch({ status: 'faulted', state: 'IDLE', error: message })
+      }
       throw error
     }
   }
 
   async disable(): Promise<void> {
     if (this.snapshotValue.status === 'disabled') return
-    if (this.snapshotValue.status === 'stopping') return
+    if (this.snapshotValue.status === 'stopping') {
+      await this.disablePromise
+      return
+    }
+    const generation = ++this.lifecycleGeneration
     this.patch({ status: 'stopping' })
     this.stopAutonomyInputs()
     this.engine.stop()
+    const operation = this.finishDisable(generation)
+    this.disablePromise = operation
     try {
-      await this.scheduler.cancel()
-      this.patch({ status: 'disabled', state: 'IDLE', error: undefined })
-    } catch (error) {
-      await this.controller.emergencyStop('Personality cleanup failed')
-      const message = `Could not stop personality mode safely: ${messageOf(error)}`
-      this.patch({ status: 'faulted', error: message })
-      throw new Error(message)
+      await operation
+    } finally {
+      if (this.disablePromise === operation) this.disablePromise = undefined
     }
   }
 
@@ -163,9 +183,8 @@ export class BehaviorRuntime {
   }
 
   async emergencyStop(reason = 'Emergency stop pressed'): Promise<void> {
-    if (this.snapshotValue.status !== 'disabled') {
-      this.patch({ status: 'stopping' })
-    }
+    const generation = ++this.lifecycleGeneration
+    this.patch({ status: 'stopping' })
     this.stopAutonomyInputs()
     this.engine.stop()
     const cancellation = this.scheduler.cancel()
@@ -175,10 +194,14 @@ export class BehaviorRuntime {
       const error =
         cancelResult.status === 'rejected' ? cancelResult.reason : stopResult.status === 'rejected' ? stopResult.reason : undefined
       const message = `Emergency stop cleanup failed: ${messageOf(error)}`
-      this.patch({ status: 'faulted', error: message })
+      if (generation === this.lifecycleGeneration) {
+        this.patch({ status: 'faulted', error: message })
+      }
       throw new Error(message)
     }
-    this.patch({ status: 'disabled', state: 'IDLE', error: undefined })
+    if (generation === this.lifecycleGeneration) {
+      this.patch({ status: 'disabled', state: 'IDLE', error: undefined })
+    }
   }
 
   notifyInteraction(): void {
@@ -189,19 +212,29 @@ export class BehaviorRuntime {
     this.enqueueEvent({ type: 'DANCE_REQUESTED', at: this.clock.now() })
   }
 
-  dispose(): void {
-    if (this.disposed) return
-    this.disposed = true
+  stop(): void {
+    this.lifecycleGeneration += 1
     this.stopAutonomyInputs()
     this.engine.stop()
     this.unsubscribeController?.()
     this.unsubscribeController = undefined
     void this.scheduler.cancel().catch(() => undefined)
+    this.patch({ status: 'disabled', state: 'IDLE', error: undefined })
+  }
+
+  dispose(): void {
+    if (this.disposed) return
+    this.stop()
+    this.disposed = true
     this.listeners.clear()
   }
 
   private handleSensors(sensors: ReactiveSensors): void {
     const events = this.eventSource.ingest(sensors, this.clock.now())
+    if (this.snapshotValue.status === 'starting') {
+      this.startupEvents.push(...events)
+      return
+    }
     if (this.snapshotValue.status !== 'running') return
     for (const event of events) this.enqueueEvent(event)
   }
@@ -219,6 +252,7 @@ export class BehaviorRuntime {
     ) {
       return
     }
+    const generation = ++this.lifecycleGeneration
     this.stopAutonomyInputs()
     this.engine.stop()
     const fault = snapshot.phase === 'error' ? snapshot.error ?? 'Evo disconnected unexpectedly' : undefined
@@ -228,10 +262,12 @@ export class BehaviorRuntime {
       error: fault,
     })
     void this.scheduler.cancel().catch((error: unknown) => {
-      this.patch({
-        status: 'faulted',
-        error: `Personality cleanup failed: ${messageOf(error)}`,
-      })
+      if (generation === this.lifecycleGeneration) {
+        this.patch({
+          status: 'faulted',
+          error: `Personality cleanup failed: ${messageOf(error)}`,
+        })
+      }
     })
   }
 
@@ -299,6 +335,7 @@ export class BehaviorRuntime {
 
   private async failSafe(reason: string): Promise<void> {
     if (!['starting', 'running'].includes(this.snapshotValue.status)) return
+    const generation = ++this.lifecycleGeneration
     this.patch({ status: 'stopping', error: reason })
     this.stopAutonomyInputs()
     this.engine.stop()
@@ -310,13 +347,38 @@ export class BehaviorRuntime {
     try {
       await this.controller.emergencyStop(reason)
     } catch (error) {
-      this.patch({
-        status: 'faulted',
-        error: `${reason}; stop failed: ${messageOf(error)}`,
-      })
+      if (generation === this.lifecycleGeneration) {
+        this.patch({
+          status: 'faulted',
+          error: `${reason}; stop failed: ${messageOf(error)}`,
+        })
+      }
       return
     }
-    this.patch({ status: 'faulted', state: 'IDLE', error: reason })
+    if (generation === this.lifecycleGeneration) {
+      this.patch({ status: 'faulted', state: 'IDLE', error: reason })
+    }
+  }
+
+  private async finishDisable(generation: number): Promise<void> {
+    try {
+      await this.scheduler.cancel()
+      if (generation === this.lifecycleGeneration) {
+        this.patch({ status: 'disabled', state: 'IDLE', error: undefined })
+      }
+    } catch (error) {
+      if (generation !== this.lifecycleGeneration) return
+      let message = `Could not stop personality mode safely: ${messageOf(error)}`
+      try {
+        await this.controller.emergencyStop('Personality cleanup failed')
+      } catch (stopError) {
+        message = `${message}; stop failed: ${messageOf(stopError)}`
+      }
+      if (generation === this.lifecycleGeneration) {
+        this.patch({ status: 'faulted', error: message })
+      }
+      throw new Error(message)
+    }
   }
 
   private patch(update: Partial<BehaviorRuntimeSnapshot>): void {

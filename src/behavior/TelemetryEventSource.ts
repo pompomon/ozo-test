@@ -38,6 +38,8 @@ export class TelemetryEventSource {
   private lastButtonTimestamp?: number
   private obstacleActive = false
   private obstacleSamples = 0
+  private rearObstacleActive = false
+  private rearObstacleSamples = 0
   private clearSamples = 0
   private staleEmitted = false
 
@@ -57,6 +59,8 @@ export class TelemetryEventSource {
     this.lastButtonTimestamp = undefined
     this.obstacleActive = false
     this.obstacleSamples = 0
+    this.rearObstacleActive = false
+    this.rearObstacleSamples = 0
     this.clearSamples = 0
     this.staleEmitted = false
   }
@@ -72,6 +76,7 @@ export class TelemetryEventSource {
       this.lastPickupTimestamp = sensors.pickup.timestamp
       this.pickedUp = sensors.pickup.pickedUp
       this.lastButtonTimestamp = sensors.button.timestamp
+      if (this.pickedUp) events.push({ type: 'PICKED_UP', at })
       return events
     }
 
@@ -128,14 +133,21 @@ export class TelemetryEventSource {
         ? value <= this.config.obstacleClearThreshold
         : value >= this.config.obstacleClearThreshold
 
+    const frontNear = near(reading.leftFront) || near(reading.rightFront)
+    const rearNear = near(reading.leftRear) || near(reading.rightRear)
+    const allClear = [
+      reading.leftFront,
+      reading.rightFront,
+      reading.leftRear,
+      reading.rightRear,
+    ].every(clear)
+
     if (!this.obstacleActive) {
       this.clearSamples = 0
-      this.obstacleSamples =
-        near(reading.leftFront) || near(reading.rightFront)
-          ? this.obstacleSamples + 1
-          : 0
+      this.obstacleSamples = frontNear || rearNear ? this.obstacleSamples + 1 : 0
       if (this.obstacleSamples >= this.config.obstacleDebounceSamples) {
         this.obstacleActive = true
+        this.rearObstacleActive = rearNear
         this.obstacleSamples = 0
         events.push({ type: 'OBSTACLE_DETECTED', at, reading })
       }
@@ -143,12 +155,24 @@ export class TelemetryEventSource {
     }
 
     this.obstacleSamples = 0
-    this.clearSamples =
-      clear(reading.leftFront) && clear(reading.rightFront)
-        ? this.clearSamples + 1
-        : 0
+    if (rearNear && !this.rearObstacleActive) {
+      this.rearObstacleSamples += 1
+      if (this.rearObstacleSamples >= this.config.obstacleDebounceSamples) {
+        this.rearObstacleActive = true
+        this.rearObstacleSamples = 0
+        events.push({ type: 'OBSTACLE_DETECTED', at, reading })
+      }
+    } else if (!rearNear) {
+      this.rearObstacleSamples = 0
+      if (clear(reading.leftRear) && clear(reading.rightRear)) {
+        this.rearObstacleActive = false
+      }
+    }
+
+    this.clearSamples = allClear ? this.clearSamples + 1 : 0
     if (this.clearSamples >= this.config.obstacleDebounceSamples) {
       this.obstacleActive = false
+      this.rearObstacleActive = false
       this.clearSamples = 0
       events.push({ type: 'OBSTACLE_CLEARED', at, reading })
     }

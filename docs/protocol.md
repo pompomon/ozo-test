@@ -72,6 +72,26 @@ Ordinary short packets have no application-level checksum. BLE supplies link-lay
 
 Reads longer than 15 data bytes are split to stay within the conservative 20-byte notification payload.
 
+### Reactive sensor reads
+
+Personality mode uses the same memory-read RPC and parsers as full telemetry, but limits each
+sample to the safety-relevant regions:
+
+| Signal | Address | Bytes |
+| --- | ---: | ---: |
+| Pickup state | 113 | 5 |
+| Four-direction IR proximity | 118 | 8 |
+| Button state | 196 | 5 |
+
+`EvoController.startReactiveSensorPolling()` stops the ordinary full-telemetry interval, establishes
+a baseline, and then performs one non-overlapping focused sample at a configurable cadence. Ending
+personality mode restores full telemetry polling. Memory operations remain serialized by
+`ModernEvoClient`; behavior code does not access the protocol or transport layers directly.
+
+The proximity fields are exposed as raw bytes. Their polarity, useful thresholds, and relationship
+to physical distance remain hardware-validation items. The behavior configuration therefore keeps
+autonomous movement disabled by default.
+
 ## Legacy profile
 
 **Confidence:** medium for the two characteristics and commands, low for service discovery; firmware version unknown.
@@ -96,6 +116,8 @@ The official driver sends `StopExecution(0)` as soon as it opens the control cha
 4. Send 250 ms velocity commands no faster than every 100 ms.
 5. Clear pending movement and prioritize stop on release, focus loss, page hiding, disconnect, disarm, or emergency stop.
 6. Never replay a command or restore arming after reconnecting.
+7. Cancel the active personality action plan before returning control to the manual UI.
+8. Treat stale focused sensor data as loss of autonomous control and follow the emergency-stop path.
 
 Movement acknowledgments (`Velocity` response `105`) now use movement-specific timeout handling: one transient timeout is tolerated with an immediate retry, and two consecutive misses trigger an emergency stop path.
 

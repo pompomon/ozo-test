@@ -18,6 +18,39 @@ describe('EvoController', () => {
     await controller.disconnect()
   })
 
+  it('switches from full telemetry to focused non-overlapping sensor polling', async () => {
+    const transport = new FakeTransport(EVO_3_PROFILE, createModernResponder({
+      113: [1, 5, 0, 0, 0],
+      118: [1, 2, 3, 4, 6, 0, 0, 0],
+      196: [0, 7, 0, 0, 0],
+    }))
+    const controller = new EvoController(transport)
+    await controller.connect()
+    await controller.arm()
+    transport.writes.splice(0)
+    const samples: number[] = []
+    const stop = await controller.startReactiveSensorPolling(
+      (sensors) => samples.push(sensors.proximity.leftFront),
+      () => undefined,
+      1_000,
+    )
+    stop()
+
+    expect(samples).toEqual([2])
+    const reads = transport.writes
+      .filter((write) => readMessageId(write.data) === 1)
+      .map((write) => {
+        const view = new DataView(write.data.buffer, write.data.byteOffset, write.data.byteLength)
+        return { address: view.getUint32(2, true), length: view.getUint16(6, true) }
+      })
+    expect(reads).toEqual([
+      { address: 118, length: 8 },
+      { address: 113, length: 5 },
+      { address: 196, length: 5 },
+    ])
+    await controller.disconnect()
+  })
+
   it('requires arming and prioritizes a stop after movement', async () => {
     const transport = new FakeTransport(EVO_3_PROFILE, createModernResponder())
     const controller = new EvoController(transport)
@@ -30,7 +63,11 @@ describe('EvoController', () => {
     await vi.waitFor(() => {
       expect(transport.writes.some((write) => readMessageId(write.data) === 104)).toBe(true)
     })
-    await controller.emergencyStop()
+    const stopping = controller.emergencyStop()
+    expect(controller.snapshot.phase).toBe('stopping')
+    controller.setDrive(1, 1)
+    expect(controller.snapshot.wheels).toEqual({ left: 0, right: 0 })
+    await stopping
     const stop = transport.writes.findLast((write) => readMessageId(write.data) === 120)
     expect(stop?.options?.priority).toBe(true)
     expect(new DataView(stop!.data.buffer, stop!.data.byteOffset, stop!.data.byteLength).getUint32(2, true)).toBe(0)
@@ -51,6 +88,7 @@ describe('EvoController', () => {
         }
         await responder(write, fake)
       })
+
       const controller = new EvoController(transport)
       await controller.connect()
       await controller.arm()
@@ -61,6 +99,39 @@ describe('EvoController', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('does not deliver a focused sensor sample after polling is cancelled', async () => {
+    const responder = createModernResponder()
+    let blockReactiveRead = false
+    let releaseRead = (): void => undefined
+    const blocked = new Promise<void>((resolve) => {
+      releaseRead = resolve
+    })
+    const transport = new FakeTransport(EVO_3_PROFILE, async (write, fake) => {
+      if (blockReactiveRead && readMessageId(write.data) === 1) await blocked
+      await responder(write, fake)
+    })
+    const controller = new EvoController(transport)
+    await controller.connect()
+    await controller.arm()
+    transport.writes.splice(0)
+    blockReactiveRead = true
+    const samples: number[] = []
+    const polling = controller.startReactiveSensorPolling(
+      (sensors) => samples.push(sensors.receivedAt),
+      () => undefined,
+      1_000,
+    )
+    const assertion = expect(polling).rejects.toThrow(/interrupted/)
+    await vi.waitFor(() => {
+      expect(transport.writes.some((write) => readMessageId(write.data) === 1)).toBe(true)
+    })
+    await controller.disarm()
+    releaseRead()
+    await assertion
+    expect(samples).toEqual([])
+    await controller.disconnect()
   })
 
   it('escalates to safe stop after repeated drive 105 timeouts', async () => {

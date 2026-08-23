@@ -23,6 +23,9 @@ The site must run on HTTPS or `localhost`. Selecting a device must follow a user
 - Eight-LED selection, RGB color, and brightness
 - Tone playback and stop-sound control
 - Battery, firmware, IR, color, line, surface, odometry, encoder, charger, and button telemetry
+- Deterministic personality states with cancellable lights, tones, and bounded action sequences
+- Focused obstacle, pickup, and button polling with stale-sensor fail-safe behavior
+- Explicit manual/autonomous ownership; disconnect, disarm, and emergency stop always cancel autonomy
 - Capability detection for the official Evo 3.x RPC service
 - Detection and safe rejection of an incomplete legacy protocol
 - Local, redacted diagnostics with copy/export
@@ -37,8 +40,14 @@ The site must run on HTTPS or `localhost`. Selecting a device must follow a user
 5. Put Evo on a stand with its wheels clear.
 6. Select **Arm motors**, then test at the default 120 mm/s limit.
 7. Use **Emergency stop** or the Space key whenever control is uncertain.
+8. Optionally select **Enable personality**. Select **Return to manual** before using direct controls.
 
-If the app detects the legacy service, update Evo using the official Ozobot application and reconnect. The legacy profile lacks verified sound and telemetry commands, so this app deliberately keeps its motors locked.
+If the app detects the legacy service, it keeps the motors locked because that profile lacks verified sound and telemetry commands. The application does not depend on the official Ozobot app or website.
+
+Autonomous movement ships locked (`movementEnabled: false`) until the proximity direction and
+thresholds in the hardware checklist are validated on a physical Evo. Personality states, focused
+sensor monitoring, LEDs, and tones still operate. Developers can enable bounded movement through
+`createBehaviorConfig` only after recording those hardware results.
 
 ## Development
 
@@ -68,12 +77,15 @@ The Vite build uses relative asset paths, so it works at both a custom domain an
 ## Safety and limitations
 
 - Browsers cannot guarantee a final BLE write when a page is killed or a phone suspends it. Movement is refreshed as short, expiring commands so Evo should stop after at most 250 ms if the documented firmware watchdog works.
+- Personality mode is foreground-only. Focus loss, a hidden page, stale reactive sensor data, or a BLE failure cancels its active plan and follows the emergency-stop path.
+- One action plan owns the robot at a time. Transitions abort the previous plan, stop motion and sound, and ignore obsolete completions.
 - Movement requests track `Velocity` acknowledgments (`105`) with bounded timeouts; one transient miss is retried and repeated misses trigger a fail-safe stop.
 - The app sends `StopExecution(0)` immediately after connecting and never restores armed state.
 - A Web Lock prevents two tabs from arming on supported browsers.
 - The screen wake lock is best-effort and does not replace supervision.
 - No firmware update mechanism is implemented.
 - Named audio assets use a larger RPC format and are not enabled; the app uses the verified short `PlayTone` command.
+- Proximity values are raw firmware bytes, not physical distance measurements. The default thresholds are provisional and autonomous movement remains disabled until calibrated.
 
 See [protocol provenance](docs/protocol.md) for confidence levels and [hardware validation](docs/hardware-validation.md) for the required release checks.
 

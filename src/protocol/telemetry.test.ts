@@ -4,6 +4,7 @@ import {
   parseBattery,
   parseFirmware,
   parseLineSensors,
+  parsePickup,
   parsePosition,
   parseProcessedColor,
   parseSurface,
@@ -96,10 +97,15 @@ describe('Evo telemetry decoding', () => {
     })
   })
 
+  it('parses focused pickup state', () => {
+    const pickup = setTimestamp(Uint8Array.of(1, 0, 0, 0, 0), 1, 45)
+    expect(parsePickup(pickup)).toEqual({ pickedUp: true, timestamp: 45 })
+  })
+
   it('rejects malformed or out-of-range telemetry', () => {
     expect(() => parseFirmware(Uint8Array.of(3, 7))).toThrow(RangeError)
     expect(() => parseBattery(Uint8Array.of(0, 0, 101, 0, 0, 0, 0, 0))).toThrow(/percentage/)
     expect(() => parseProcessedColor(Uint8Array.of(0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0))).toThrow(/light source/)
+    expect(() => parsePickup(Uint8Array.of(2, 0, 0, 0, 0))).toThrow(/pickup state/)
   })
 })
-

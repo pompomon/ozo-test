@@ -7,6 +7,7 @@ import {
 import {
   movement,
   noExitActions,
+  rearIsClear,
   repeat,
   transition,
   turnAwayDirection,
@@ -21,7 +22,7 @@ function angryPlan(context: BehaviorContext): readonly RobotAction[] {
     { type: 'LIGHTS', mask: 0xff, color: '#ff6a00', brightness: 95 },
     { type: 'TONE', frequencyHz: 330, durationMs: 180 },
     { type: 'TONE', frequencyHz: 294, durationMs: 220 },
-    ...(!context.pickedUp
+    ...(!context.pickedUp && rearIsClear(context.obstacle, context.config)
       ? movement(context.config, turn * speed, -turn * speed, 480)
       : []),
     { type: 'STOP_MOTION' },

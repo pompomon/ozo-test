@@ -22,6 +22,7 @@ export class FakeTransport implements EvoTransport {
   connected = false
   connection?: TransportConnection
   readonly writes: RecordedWrite[] = []
+  readonly clearedReplaceKeys: (string | undefined)[] = []
   private readonly packetHandlers = new Set<PacketHandler>()
   private readonly disconnectHandlers = new Set<DisconnectHandler>()
 
@@ -55,7 +56,9 @@ export class FakeTransport implements EvoTransport {
     await this.responder?.(write, this)
   }
 
-  clearQueued(): void {}
+  clearQueued(replaceKey?: string): void {
+    this.clearedReplaceKeys.push(replaceKey)
+  }
 
   subscribe(handler: PacketHandler): () => void {
     this.packetHandlers.add(handler)
@@ -78,14 +81,21 @@ export class FakeTransport implements EvoTransport {
   }
 }
 
-export function createModernResponder(memoryOverrides: Readonly<Record<number, readonly number[]>> = {}): WriteResponder {
+export interface MutableModernResponder {
+  readonly responder: WriteResponder
+  setMemory(address: number, data: readonly number[]): void
+}
+
+export function createMutableModernResponder(
+  memoryOverrides: Readonly<Record<number, readonly number[]>> = {},
+): MutableModernResponder {
   const memory = new Uint8Array(65_700)
   memory.set([3, 7, 4, 0], 65_580)
   for (const [address, data] of Object.entries(memoryOverrides)) {
     memory.set(data, Number(address))
   }
 
-  return ({ data }, transport): void => {
+  const responder: WriteResponder = ({ data }, transport): void => {
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
     const messageId = view.getUint16(0, true)
     let response: Uint8Array | undefined
@@ -109,4 +119,17 @@ export function createModernResponder(memoryOverrides: Readonly<Record<number, r
     }
     if (response) queueMicrotask(() => transport.emit(response))
   }
+
+  return {
+    responder,
+    setMemory(address, data) {
+      memory.set(data, address)
+    },
+  }
+}
+
+export function createModernResponder(
+  memoryOverrides: Readonly<Record<number, readonly number[]>> = {},
+): WriteResponder {
+  return createMutableModernResponder(memoryOverrides).responder
 }

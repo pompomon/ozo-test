@@ -1,4 +1,10 @@
-import { useCallback, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 
 interface JoystickProps {
   readonly disabled: boolean
@@ -12,6 +18,7 @@ interface Position {
 
 export function Joystick({ disabled, onChange }: JoystickProps) {
   const surfaceRef = useRef<HTMLDivElement>(null)
+  const activePointerRef = useRef<number | undefined>(undefined)
   const [position, setPosition] = useState<Position>({ x: 0, y: 0 })
   const [active, setActive] = useState(false)
 
@@ -34,6 +41,7 @@ export function Joystick({ disabled, onChange }: JoystickProps) {
   const start = (event: ReactPointerEvent<HTMLDivElement>): void => {
     if (disabled) return
     event.currentTarget.setPointerCapture(event.pointerId)
+    activePointerRef.current = event.pointerId
     setActive(true)
     update(event)
   }
@@ -47,9 +55,22 @@ export function Joystick({ disabled, onChange }: JoystickProps) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
     setActive(false)
+    activePointerRef.current = undefined
     setPosition({ x: 0, y: 0 })
     onChange(0, 0)
   }
+
+  useEffect(() => {
+    if (!disabled) return
+    const surface = surfaceRef.current
+    const pointerId = activePointerRef.current
+    activePointerRef.current = undefined
+    setActive(false)
+    setPosition({ x: 0, y: 0 })
+    if (pointerId !== undefined && surface?.hasPointerCapture(pointerId)) {
+      surface.releasePointerCapture(pointerId)
+    }
+  }, [disabled])
 
   return (
     <div
@@ -76,4 +97,3 @@ export function Joystick({ disabled, onChange }: JoystickProps) {
     </div>
   )
 }
-

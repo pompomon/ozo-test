@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { BehaviorRuntime } from './behavior/BehaviorRuntime.ts'
+import type { BehaviorRuntimeSnapshot } from './behavior/types.ts'
 import { EvoController, type ControllerSnapshot } from './controller/EvoController.ts'
 import { mixJoystick } from './controller/drive.ts'
 import { missingCapabilities } from './protocol/profile.ts'
 import { usePwa } from './pwa/usePwa.ts'
+import { BehaviorPanel } from './ui/BehaviorPanel.tsx'
 import { DiagnosticsPanel } from './ui/DiagnosticsPanel.tsx'
 import { Joystick } from './ui/Joystick.tsx'
 import { TelemetryPanel } from './ui/TelemetryPanel.tsx'
@@ -26,6 +29,7 @@ const TONES = [
 
 interface AppProps {
   readonly controller?: EvoController
+  readonly behaviorRuntime?: BehaviorRuntime
 }
 
 function useController(controller: EvoController): ControllerSnapshot {
@@ -34,8 +38,24 @@ function useController(controller: EvoController): ControllerSnapshot {
   return snapshot
 }
 
-export default function App({ controller = defaultController }: AppProps) {
+function useBehaviorRuntime(runtime: BehaviorRuntime): BehaviorRuntimeSnapshot {
+  const [snapshot, setSnapshot] = useState(runtime.snapshot)
+  useEffect(() => runtime.subscribe(setSnapshot), [runtime])
+  useEffect(() => {
+    runtime.start()
+    return () => runtime.stop()
+  }, [runtime])
+  return snapshot
+}
+
+export default function App({
+  controller = defaultController,
+  behaviorRuntime: providedBehaviorRuntime,
+}: AppProps) {
+  const ownedBehaviorRuntime = useMemo(() => new BehaviorRuntime(controller), [controller])
+  const behaviorRuntime = providedBehaviorRuntime ?? ownedBehaviorRuntime
   const snapshot = useController(controller)
+  const behavior = useBehaviorRuntime(behaviorRuntime)
   const [leftWheel, setLeftWheel] = useState(0)
   const [rightWheel, setRightWheel] = useState(0)
   const [ledMask, setLedMask] = useState(0xff)
@@ -45,24 +65,29 @@ export default function App({ controller = defaultController }: AppProps) {
   const [toneDuration, setToneDuration] = useState(500)
   const [actionError, setActionError] = useState<string>()
   const armed = snapshot.phase === 'armed'
-  const pwa = usePwa(armed)
-  const connected = ['connecting', 'ready', 'armed', 'incompatible'].includes(snapshot.phase)
+  const motorsBusy = armed || snapshot.phase === 'stopping'
+  const pwa = usePwa(motorsBusy)
+  const connected = ['connecting', 'ready', 'armed', 'stopping', 'incompatible'].includes(snapshot.phase)
   const controlsEnabled = ['ready', 'armed'].includes(snapshot.phase)
+  const autonomous = ['starting', 'running', 'stopping'].includes(behavior.status)
+  const manualControlsEnabled = controlsEnabled && !autonomous
+  const manualDriveEnabled = armed && !autonomous
 
   useEffect(() => controller.installSafetyHandlers(), [controller])
 
   useEffect(() => {
-    if (!armed) {
+    if (!manualDriveEnabled) {
       setLeftWheel(0)
       setRightWheel(0)
     }
-  }, [armed])
+  }, [manualDriveEnabled])
 
   useEffect(() => {
     if (!armed) return
     const pressed = new Set<string>()
     const movementKeys = new Set(['w', 'a', 's', 'd', 'arrowup', 'arrowleft', 'arrowdown', 'arrowright'])
     const updateDrive = (): void => {
+      if (!manualDriveEnabled) return
       const y = Number(pressed.has('w') || pressed.has('arrowup')) - Number(pressed.has('s') || pressed.has('arrowdown'))
       const x = Number(pressed.has('d') || pressed.has('arrowright')) - Number(pressed.has('a') || pressed.has('arrowleft'))
       const wheels = mixJoystick(x, y)
@@ -73,17 +98,17 @@ export default function App({ controller = defaultController }: AppProps) {
       const key = event.key.toLowerCase()
       if (key === ' ') {
         event.preventDefault()
-        void controller.emergencyStop('Emergency stop pressed with Space')
+        void behaviorRuntime.emergencyStop('Emergency stop pressed with Space')
         return
       }
-      if (!movementKeys.has(key)) return
+      if (!manualDriveEnabled || !movementKeys.has(key)) return
       event.preventDefault()
       pressed.add(key)
       updateDrive()
     }
     const keyUp = (event: KeyboardEvent): void => {
       const key = event.key.toLowerCase()
-      if (!movementKeys.has(key)) return
+      if (!manualDriveEnabled || !movementKeys.has(key)) return
       event.preventDefault()
       pressed.delete(key)
       updateDrive()
@@ -94,7 +119,7 @@ export default function App({ controller = defaultController }: AppProps) {
       window.removeEventListener('keydown', keyDown)
       window.removeEventListener('keyup', keyUp)
     }
-  }, [armed, controller])
+  }, [armed, behaviorRuntime, controller, manualDriveEnabled])
 
   const status = useMemo(() => {
     switch (snapshot.phase) {
@@ -104,7 +129,8 @@ export default function App({ controller = defaultController }: AppProps) {
       case 'connecting': return 'Detecting firmware'
       case 'ready': return 'Connected · safe'
       case 'armed': return 'Motors armed'
-      case 'incompatible': return 'Firmware update required'
+      case 'stopping': return 'Stopping motors'
+      case 'incompatible': return 'Unsupported firmware'
       case 'error': return 'Connection error'
     }
   }, [snapshot.phase])
@@ -117,6 +143,7 @@ export default function App({ controller = defaultController }: AppProps) {
   }
 
   const updateWheel = (side: 'left' | 'right', value: number): void => {
+    if (!manualDriveEnabled) return
     if (side === 'left') {
       setLeftWheel(value)
       controller.setDrive(value / 100, rightWheel / 100)
@@ -129,10 +156,10 @@ export default function App({ controller = defaultController }: AppProps) {
   const releaseWheel = (side: 'left' | 'right'): void => {
     if (side === 'left') {
       setLeftWheel(0)
-      controller.setDrive(0, rightWheel / 100)
+      if (manualDriveEnabled) controller.setDrive(0, rightWheel / 100)
     } else {
       setRightWheel(0)
-      controller.setDrive(leftWheel / 100, 0)
+      if (manualDriveEnabled) controller.setDrive(leftWheel / 100, 0)
     }
   }
 
@@ -169,8 +196,8 @@ export default function App({ controller = defaultController }: AppProps) {
         {pwa.updateAvailable && (
           <div className="notice">
             <span>A new app version is ready.</span>
-            <button className="button button--quiet" disabled={armed} onClick={pwa.applyUpdate}>
-              {armed ? 'Disarm to update' : 'Apply update'}
+            <button className="button button--quiet" disabled={motorsBusy} onClick={pwa.applyUpdate}>
+              {motorsBusy ? 'Disarm to update' : 'Apply update'}
             </button>
           </div>
         )}
@@ -187,7 +214,11 @@ export default function App({ controller = defaultController }: AppProps) {
           </div>
           <div className="connection-card__actions">
             {connected ? (
-              <button className="button button--quiet" onClick={() => run(() => controller.disconnect())}>
+              <button
+                className="button button--quiet"
+                disabled={snapshot.phase === 'stopping' || behavior.status === 'stopping'}
+                onClick={() => run(() => behaviorRuntime.disconnect())}
+              >
                 Disconnect
               </button>
             ) : (
@@ -211,13 +242,21 @@ export default function App({ controller = defaultController }: AppProps) {
           <div className="notice notice--warning" role="alert">
             <strong>Required features are missing.</strong>
             <span>
-              Missing {missingCapabilities(snapshot.profile).join(', ')}. Update Evo in the official app,
-              then reconnect. Motors remain locked.
+              Missing {missingCapabilities(snapshot.profile).join(', ')}. This protocol profile is
+              not safe for autonomous control, so motors remain locked.
             </span>
           </div>
         )}
 
         <div className="dashboard">
+          <BehaviorPanel
+            snapshot={behavior}
+            available={armed}
+            onEnable={() => run(() => behaviorRuntime.enable())}
+            onDisable={() => run(() => behaviorRuntime.disable())}
+            onInteract={() => behaviorRuntime.notifyInteraction()}
+            onDance={() => behaviorRuntime.requestDance()}
+          />
           <section className="panel drive-panel" aria-labelledby="drive-title">
             <div className="panel__heading">
               <div>
@@ -226,15 +265,16 @@ export default function App({ controller = defaultController }: AppProps) {
               </div>
               <button
                 className={`button ${armed ? 'button--quiet' : 'button--arm'}`}
-                disabled={!controlsEnabled}
-                onClick={() => run(armed ? () => controller.disarm() : () => controller.arm())}
+                disabled={!controlsEnabled || behavior.status === 'stopping'}
+                onClick={() => run(armed ? () => behaviorRuntime.disarm() : () => controller.arm())}
               >
                 {armed ? 'Disarm' : 'Arm motors'}
               </button>
             </div>
             <Joystick
-              disabled={!armed}
+              disabled={!manualDriveEnabled}
               onChange={(x, y) => {
+                if (!manualDriveEnabled) return
                 const wheels = mixJoystick(x, y)
                 controller.setDrive(wheels.left, wheels.right)
               }}
@@ -249,6 +289,7 @@ export default function App({ controller = defaultController }: AppProps) {
                 max="300"
                 step="10"
                 value={snapshot.maximumSpeed}
+                disabled={!manualControlsEnabled}
                 onChange={(event) => controller.setMaximumSpeed(Number(event.target.value))}
               />
             </div>
@@ -276,7 +317,7 @@ export default function App({ controller = defaultController }: AppProps) {
                   min="-100"
                   max="100"
                   value={value}
-                  disabled={!armed}
+                  disabled={!manualDriveEnabled}
                   onChange={(event) => updateWheel(side, Number(event.target.value))}
                   onPointerUp={() => releaseWheel(side)}
                   onPointerCancel={() => releaseWheel(side)}
@@ -294,7 +335,7 @@ export default function App({ controller = defaultController }: AppProps) {
                 <h2 id="lights-title">Lights</h2>
               </div>
             </div>
-            <fieldset className="led-groups" disabled={!controlsEnabled}>
+            <fieldset className="led-groups" disabled={!manualControlsEnabled}>
               <legend className="sr-only">Choose LEDs</legend>
               {LED_GROUPS.map((group) => (
                 <label key={group.mask}>
@@ -315,7 +356,7 @@ export default function App({ controller = defaultController }: AppProps) {
                 <input
                   type="color"
                   value={ledColor}
-                  disabled={!controlsEnabled}
+                  disabled={!manualControlsEnabled}
                   onChange={(event) => setLedColor(event.target.value)}
                 />
               </label>
@@ -326,14 +367,14 @@ export default function App({ controller = defaultController }: AppProps) {
                   min="0"
                   max="100"
                   value={brightness}
-                  disabled={!controlsEnabled}
+                  disabled={!manualControlsEnabled}
                   onChange={(event) => setBrightness(Number(event.target.value))}
                 />
               </label>
             </div>
             <button
               className="button button--primary button--full"
-              disabled={!controlsEnabled || ledMask === 0}
+              disabled={!manualControlsEnabled || ledMask === 0}
               onClick={() => run(() => controller.setLights(ledMask, ledColor, brightness))}
             >
               Apply lights
@@ -351,7 +392,7 @@ export default function App({ controller = defaultController }: AppProps) {
               Tone
               <select
                 value={tone}
-                disabled={!controlsEnabled}
+                disabled={!manualControlsEnabled}
                 onChange={(event) => setTone(Number(event.target.value))}
               >
                 {TONES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
@@ -361,7 +402,7 @@ export default function App({ controller = defaultController }: AppProps) {
               Duration
               <select
                 value={toneDuration}
-                disabled={!controlsEnabled}
+                disabled={!manualControlsEnabled}
                 onChange={(event) => setToneDuration(Number(event.target.value))}
               >
                 <option value="200">Short · 0.2 s</option>
@@ -373,14 +414,14 @@ export default function App({ controller = defaultController }: AppProps) {
             <div className="button-row button-row--stretch">
               <button
                 className="button button--primary"
-                disabled={!controlsEnabled}
+                disabled={!manualControlsEnabled}
                 onClick={() => run(() => controller.playTone(tone, toneDuration))}
               >
                 Play tone
               </button>
               <button
                 className="button button--quiet"
-                disabled={!controlsEnabled}
+                disabled={!manualControlsEnabled}
                 onClick={() => run(() => controller.stopSound())}
               >
                 Stop sound
@@ -390,7 +431,7 @@ export default function App({ controller = defaultController }: AppProps) {
 
           <TelemetryPanel
             telemetry={snapshot.telemetry}
-            disabled={!controlsEnabled}
+            disabled={!manualControlsEnabled}
             onRefresh={() => run(() => controller.refreshTelemetry())}
           />
           <DiagnosticsPanel
@@ -409,7 +450,7 @@ export default function App({ controller = defaultController }: AppProps) {
       <button
         className="emergency-stop"
         disabled={!connected && snapshot.phase !== 'error'}
-        onClick={() => run(() => controller.emergencyStop())}
+        onClick={() => run(() => behaviorRuntime.emergencyStop())}
         onKeyDown={(event: ReactKeyboardEvent<HTMLButtonElement>) => {
           if (event.key === ' ') event.preventDefault()
         }}

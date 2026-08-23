@@ -26,6 +26,7 @@ export type ControllerPhase =
   | 'connecting'
   | 'ready'
   | 'armed'
+  | 'stopping'
   | 'incompatible'
   | 'error'
 
@@ -171,7 +172,7 @@ export class EvoController {
         this.patch({
           phase: 'incompatible',
           firmware: firmware.version,
-          error: 'This firmware predates the supported Evo 3.x protocol. Update Evo with the official app.',
+          error: 'This firmware predates the supported Evo 3.x protocol. Motors remain locked.',
         })
         return
       }
@@ -245,6 +246,7 @@ export class EvoController {
   async disarm(): Promise<void> {
     if (this.snapshotValue.phase !== 'armed') return
     this.stopReactiveSensorPolling()
+    this.patch({ phase: 'stopping', wheels: { left: 0, right: 0 } })
     let stopFailure: string | undefined
     try {
       await this.stopMotion()
@@ -304,6 +306,9 @@ export class EvoController {
     this.targetWheels = { left: 0, right: 0 }
     this.driveGeneration += 1
     this.transport.clearQueued('movement')
+    if (wasArmed) {
+      this.patch({ phase: 'stopping', wheels: { left: 0, right: 0 } })
+    }
     try {
       await this.stopMotion()
     } catch (error) {
@@ -398,7 +403,14 @@ export class EvoController {
     const poll = async (): Promise<void> => {
       if (generation !== this.reactiveSensorGeneration) return
       try {
-        handler(await this.readReactiveSensors())
+        const sensors = await this.readReactiveSensors()
+        if (
+          generation === this.reactiveSensorGeneration &&
+          this.snapshotValue.phase === 'armed' &&
+          this.transport.connected
+        ) {
+          handler(sensors)
+        }
       } catch (error) {
         if (generation === this.reactiveSensorGeneration && this.transport.connected) {
           onError(error instanceof Error ? error : new Error(errorMessage(error)))
@@ -417,7 +429,15 @@ export class EvoController {
     }
 
     try {
-      handler(await this.readReactiveSensors())
+      const sensors = await this.readReactiveSensors()
+      if (
+        generation !== this.reactiveSensorGeneration ||
+        this.snapshotValue.phase !== 'armed' ||
+        !this.transport.connected
+      ) {
+        throw new Error('Reactive sensor polling was interrupted')
+      }
+      handler(sensors)
     } catch (error) {
       if (generation === this.reactiveSensorGeneration) {
         this.stopReactiveSensorPolling()

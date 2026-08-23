@@ -45,7 +45,7 @@ export const LEGACY_PROFILE: ProtocolProfile = {
   },
   verified: false,
   compatibilityMessage:
-    'This legacy firmware does not expose every required feature. Update Evo with the official app before enabling motors.',
+    'This legacy firmware profile does not expose every required feature. Motors remain locked.',
 }
 
 export const REQUIRED_CAPABILITIES: readonly Capability[] = [
@@ -64,4 +64,3 @@ export function missingCapabilities(profile: ProtocolProfile): Capability[] {
 export function isFullyCompatible(profile: ProtocolProfile): boolean {
   return missingCapabilities(profile).length === 0
 }
-

@@ -46,6 +46,7 @@ export class BehaviorEngine {
   private obstacle?: ObstacleReading
   private pickedUp = false
   private obstacleDetections: number[] = []
+  private boredSinceInteraction = false
 
   constructor(config: BehaviorConfig, clock: Clock, random: RandomSource) {
     this.config = config
@@ -76,6 +77,7 @@ export class BehaviorEngine {
     this.obstacle = undefined
     this.pickedUp = false
     this.obstacleDetections = []
+    this.boredSinceInteraction = false
     return {
       actions: STATES.IDLE.enter(this.context(now)),
       priority: BEHAVIOR_PRIORITY.ambient,
@@ -129,6 +131,7 @@ export class BehaviorEngine {
       }
       if (
         context.inactivityMs >= this.config.boredAfterMs &&
+        !this.boredSinceInteraction &&
         !['BORED', 'SLEEPING'].includes(this.currentStateValue)
       ) {
         return this.transitionTo('BORED', 'interaction inactivity', event.at, BEHAVIOR_PRIORITY.timer)
@@ -146,8 +149,10 @@ export class BehaviorEngine {
   private updateWorld(event: BehaviorEvent): void {
     if (event.type === 'USER_INTERACTION' || event.type === 'DANCE_REQUESTED') {
       this.lastInteractionAt = event.at
+      this.boredSinceInteraction = false
     } else if (event.type === 'BUTTON_PRESSED') {
       this.lastInteractionAt = event.at
+      this.boredSinceInteraction = false
     } else if (event.type === 'OBSTACLE_DETECTED') {
       this.obstacleActive = true
       this.obstacle = event.reading
@@ -192,6 +197,7 @@ export class BehaviorEngine {
     const previousState = this.currentStateValue
     const exitActions = STATES[previousState].exit(this.context(now))
     this.currentStateValue = nextState
+    if (nextState === 'BORED') this.boredSinceInteraction = true
     this.stateEnteredAt = now
     const transition: BehaviorTransition = {
       from: previousState,
