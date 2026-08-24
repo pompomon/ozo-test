@@ -52,6 +52,14 @@ describe('TelemetryEventSource', () => {
     ])
   })
 
+  it('counts the baseline proximity reading toward obstacle detection', () => {
+    const source = new TelemetryEventSource(createBehaviorConfig(), { now: () => 0 })
+    expect(source.ingest(sensors(0, { leftFront: 90 }))).toEqual([])
+    expect(source.ingest(sensors(1, { leftFront: 91 }))).toEqual([
+      expect.objectContaining({ type: 'OBSTACLE_DETECTED' }),
+    ])
+  })
+
   it('deduplicates timestamps and emits pickup and button edges', () => {
     const source = new TelemetryEventSource(createBehaviorConfig(), { now: () => 0 })
     source.ingest(sensors(0))

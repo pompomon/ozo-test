@@ -77,6 +77,7 @@ export class TelemetryEventSource {
       this.pickedUp = sensors.pickup.pickedUp
       this.lastButtonTimestamp = sensors.button.timestamp
       if (this.pickedUp) events.push({ type: 'PICKED_UP', at })
+      this.updateObstacle(readingOf(sensors), at, events)
       return events
     }
 

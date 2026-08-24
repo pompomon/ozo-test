@@ -85,10 +85,13 @@ describe('BehaviorRuntime', () => {
     const { runtime, transport } = await connectedRuntime()
     await runtime.enable()
     transport.simulateDisconnect()
-    expect(runtime.snapshot).toMatchObject({
-      status: 'faulted',
-      state: 'IDLE',
-      error: 'Simulated disconnect',
+    expect(runtime.snapshot.status).toBe('stopping')
+    await vi.waitFor(() => {
+      expect(runtime.snapshot).toMatchObject({
+        status: 'faulted',
+        state: 'IDLE',
+        error: 'Simulated disconnect',
+      })
     })
   })
 
@@ -97,9 +100,12 @@ describe('BehaviorRuntime', () => {
     await runtime.enable()
     const stopping = controller.emergencyStop('Control focus was lost')
     expect(controller.snapshot.phase).toBe('stopping')
-    expect(runtime.snapshot.status).toBe('disabled')
+    expect(runtime.snapshot.status).toBe('stopping')
     await stopping
     expect(controller.snapshot.phase).toBe('ready')
+    await vi.waitFor(() => {
+      expect(runtime.snapshot.status).toBe('disabled')
+    })
   })
 
   it('uses the emergency-stop path when an autonomous action fails', async () => {

@@ -80,7 +80,7 @@ describe('Evo Control UI', () => {
     const enablePersonality = await screen.findByRole('button', { name: 'Enable personality' })
     await waitFor(() => expect(enablePersonality).toBeEnabled())
     fireEvent.click(enablePersonality)
-    await screen.findByText('Autonomous')
+    expect(await screen.findByText('Autonomous')).toHaveAttribute('role', 'status')
 
     expect(screen.getByRole('application', { name: 'Drive joystick' }))
       .toHaveAttribute('aria-disabled', 'true')

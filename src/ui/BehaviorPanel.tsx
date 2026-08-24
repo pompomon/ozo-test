@@ -35,7 +35,7 @@ export function BehaviorPanel({
           <p className="eyebrow">Personality engine</p>
           <h2 id="behavior-title">Autonomous behavior</h2>
         </div>
-        <span className={`behavior-status behavior-status--${snapshot.status}`}>
+        <span role="status" className={`behavior-status behavior-status--${snapshot.status}`}>
           {STATUS_LABELS[snapshot.status]}
         </span>
       </div>

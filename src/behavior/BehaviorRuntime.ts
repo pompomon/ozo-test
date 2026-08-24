@@ -256,19 +256,33 @@ export class BehaviorRuntime {
     this.stopAutonomyInputs()
     this.engine.stop()
     const fault = snapshot.phase === 'error' ? snapshot.error ?? 'Evo disconnected unexpectedly' : undefined
-    this.patch({
-      status: fault ? 'faulted' : 'disabled',
-      state: 'IDLE',
-      error: fault,
+    this.patch({ status: 'stopping', error: fault })
+    const operation = this.finishControllerStop(generation, fault)
+    this.disablePromise = operation
+    void operation.finally(() => {
+      if (this.disablePromise === operation) this.disablePromise = undefined
     })
-    void this.scheduler.cancel().catch((error: unknown) => {
+  }
+
+  private async finishControllerStop(generation: number, fault?: string): Promise<void> {
+    try {
+      await this.scheduler.cancel()
+      if (generation === this.lifecycleGeneration) {
+        this.patch({
+          status: fault ? 'faulted' : 'disabled',
+          state: 'IDLE',
+          error: fault,
+        })
+      }
+    } catch (error) {
       if (generation === this.lifecycleGeneration) {
         this.patch({
           status: 'faulted',
+          state: 'IDLE',
           error: `Personality cleanup failed: ${messageOf(error)}`,
         })
       }
-    })
+    }
   }
 
   private enqueueEvent(event: BehaviorEvent): void {
