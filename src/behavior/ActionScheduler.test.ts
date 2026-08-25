@@ -63,4 +63,22 @@ describe('ActionScheduler', () => {
     await expect(ticket.completion).rejects.toThrow('action failed')
     expect(port.cleanups).toBe(1)
   })
+
+  it('reports cancellation that occurs during cleanup', async () => {
+    let releaseCleanup!: () => void
+    const cleanup = new Promise<void>((resolve) => {
+      releaseCleanup = resolve
+    })
+    const port = new FakeActionPort()
+    port.cleanup = vi.fn(() => cleanup)
+    const scheduler = new ActionScheduler(port)
+    const ticket = scheduler.schedule([{ type: 'STOP_MOTION' }], 10)
+    await vi.waitFor(() => expect(port.cleanup).toHaveBeenCalled())
+
+    const cancellation = scheduler.cancel()
+    releaseCleanup()
+
+    await cancellation
+    expect(await ticket.completion).toBe('cancelled')
+  })
 })

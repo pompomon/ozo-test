@@ -79,6 +79,41 @@ describe('BehaviorRuntime', () => {
     expect(runtime.snapshot.status).toBe('disabled')
   })
 
+  it('waits for an in-progress emergency stop before stopping', async () => {
+    let releaseStop!: () => void
+    const blockedStop = new Promise<void>((resolve) => {
+      releaseStop = resolve
+    })
+    let blockStops = false
+    const responder = createModernResponder()
+    const transport = new FakeTransport(EVO_3_PROFILE, async (write, fake) => {
+      if (blockStops && readMessageId(write.data) === 120) await blockedStop
+      await responder(write, fake)
+    })
+    const controller = new EvoController(transport)
+    const runtime = new BehaviorRuntime(controller, { seed: 123 })
+    resources.push({ runtime, controller })
+    runtime.start()
+    await controller.connect()
+    await controller.arm()
+    await runtime.enable()
+
+    blockStops = true
+    const emergencyStop = runtime.emergencyStop()
+    const stopping = runtime.stop()
+    let stopped = false
+    void stopping.then(() => {
+      stopped = true
+    })
+    await Promise.resolve()
+    expect(runtime.snapshot.status).toBe('stopping')
+    expect(stopped).toBe(false)
+
+    releaseStop()
+    await Promise.all([emergencyStop, stopping])
+    expect(runtime.snapshot.status).toBe('disabled')
+  })
+
   it('processes explicit dance requests through the state engine', async () => {
     const { runtime } = await connectedRuntime()
     await runtime.enable()

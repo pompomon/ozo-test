@@ -47,7 +47,7 @@ export class BehaviorRuntime {
   private eventChain: Promise<void> = Promise.resolve()
   private startupEvents: BehaviorEvent[] = []
   private lifecycleGeneration = 0
-  private disablePromise?: Promise<void>
+  private stoppingPromise?: Promise<void>
   private disposed = false
 
   constructor(controller: EvoController, options: BehaviorRuntimeOptions = {}) {
@@ -129,44 +129,42 @@ export class BehaviorRuntime {
       for (const event of this.startupEvents.splice(0)) this.enqueueEvent(event)
     } catch (error) {
       if (generation !== this.lifecycleGeneration) throw error
-      this.patch({ status: 'stopping', error: messageOf(error) })
-      this.stopAutonomyInputs()
-      this.engine.stop()
-      try {
-        await this.scheduler.cancel()
-      } catch {
-        // The original startup failure remains the actionable error.
-      }
-      let message = messageOf(error)
-      try {
-        await this.controller.emergencyStop('Personality mode could not start')
-      } catch (stopError) {
-        message = `${message}; stop failed: ${messageOf(stopError)}`
-      }
-      if (generation === this.lifecycleGeneration) {
-        this.patch({ status: 'faulted', state: 'IDLE', error: message })
-      }
-      throw error
+      return this.beginStopping(async () => {
+        this.patch({ status: 'stopping', error: messageOf(error) })
+        this.stopAutonomyInputs()
+        this.engine.stop()
+        try {
+          await this.scheduler.cancel()
+        } catch {
+          // The original startup failure remains the actionable error.
+        }
+        let message = messageOf(error)
+        try {
+          await this.controller.emergencyStop('Personality mode could not start')
+        } catch (stopError) {
+          message = `${message}; stop failed: ${messageOf(stopError)}`
+        }
+        if (generation === this.lifecycleGeneration) {
+          this.patch({ status: 'faulted', state: 'IDLE', error: message })
+        }
+        throw error
+      })
     }
   }
 
   async disable(): Promise<void> {
     if (this.snapshotValue.status === 'disabled') return
     if (this.snapshotValue.status === 'stopping') {
-      await this.disablePromise
+      await this.stoppingPromise
       return
     }
-    const generation = ++this.lifecycleGeneration
-    this.patch({ status: 'stopping' })
-    this.stopAutonomyInputs()
-    this.engine.stop()
-    const operation = this.finishDisable(generation)
-    this.disablePromise = operation
-    try {
-      await operation
-    } finally {
-      if (this.disablePromise === operation) this.disablePromise = undefined
-    }
+    return this.beginStopping(async () => {
+      const generation = ++this.lifecycleGeneration
+      this.patch({ status: 'stopping' })
+      this.stopAutonomyInputs()
+      this.engine.stop()
+      await this.finishDisable(generation)
+    })
   }
 
   async disarm(): Promise<void> {
@@ -183,25 +181,27 @@ export class BehaviorRuntime {
   }
 
   async emergencyStop(reason = 'Emergency stop pressed'): Promise<void> {
-    const generation = ++this.lifecycleGeneration
-    this.patch({ status: 'stopping' })
-    this.stopAutonomyInputs()
-    this.engine.stop()
-    const cancellation = this.scheduler.cancel()
-    const stop = this.controller.emergencyStop(reason)
-    const [cancelResult, stopResult] = await Promise.allSettled([cancellation, stop])
-    if (cancelResult.status === 'rejected' || stopResult.status === 'rejected') {
-      const error =
-        cancelResult.status === 'rejected' ? cancelResult.reason : stopResult.status === 'rejected' ? stopResult.reason : undefined
-      const message = `Emergency stop cleanup failed: ${messageOf(error)}`
-      if (generation === this.lifecycleGeneration) {
-        this.patch({ status: 'faulted', error: message })
+    return this.beginStopping(async () => {
+      const generation = ++this.lifecycleGeneration
+      this.patch({ status: 'stopping' })
+      this.stopAutonomyInputs()
+      this.engine.stop()
+      const cancellation = this.scheduler.cancel()
+      const stop = this.controller.emergencyStop(reason)
+      const [cancelResult, stopResult] = await Promise.allSettled([cancellation, stop])
+      if (cancelResult.status === 'rejected' || stopResult.status === 'rejected') {
+        const error =
+          cancelResult.status === 'rejected' ? cancelResult.reason : stopResult.status === 'rejected' ? stopResult.reason : undefined
+        const message = `Emergency stop cleanup failed: ${messageOf(error)}`
+        if (generation === this.lifecycleGeneration) {
+          this.patch({ status: 'faulted', error: message })
+        }
+        throw new Error(message)
       }
-      throw new Error(message)
-    }
-    if (generation === this.lifecycleGeneration) {
-      this.patch({ status: 'disabled', state: 'IDLE', error: undefined })
-    }
+      if (generation === this.lifecycleGeneration) {
+        this.patch({ status: 'disabled', state: 'IDLE', error: undefined })
+      }
+    })
   }
 
   notifyInteraction(): void {
@@ -255,11 +255,9 @@ export class BehaviorRuntime {
     this.stopAutonomyInputs()
     this.engine.stop()
     const fault = snapshot.phase === 'error' ? snapshot.error ?? 'Evo disconnected unexpectedly' : undefined
-    this.patch({ status: 'stopping', error: fault })
-    const operation = this.finishControllerStop(generation, fault)
-    this.disablePromise = operation
-    void operation.finally(() => {
-      if (this.disablePromise === operation) this.disablePromise = undefined
+    void this.beginStopping(async () => {
+      this.patch({ status: 'stopping', error: fault })
+      await this.finishControllerStop(generation, fault)
     })
   }
 
@@ -348,29 +346,56 @@ export class BehaviorRuntime {
 
   private async failSafe(reason: string): Promise<void> {
     if (!['starting', 'running'].includes(this.snapshotValue.status)) return
-    const generation = ++this.lifecycleGeneration
-    this.patch({ status: 'stopping', error: reason })
-    this.stopAutonomyInputs()
-    this.engine.stop()
-    try {
-      await this.scheduler.cancel()
-    } catch {
-      // Emergency stop below is still required.
-    }
-    try {
-      await this.controller.emergencyStop(reason)
-    } catch (error) {
-      if (generation === this.lifecycleGeneration) {
-        this.patch({
-          status: 'faulted',
-          error: `${reason}; stop failed: ${messageOf(error)}`,
-        })
+    return this.beginStopping(async () => {
+      const generation = ++this.lifecycleGeneration
+      this.patch({ status: 'stopping', error: reason })
+      this.stopAutonomyInputs()
+      this.engine.stop()
+      try {
+        await this.scheduler.cancel()
+      } catch {
+        // Emergency stop below is still required.
       }
-      return
+      try {
+        await this.controller.emergencyStop(reason)
+      } catch (error) {
+        if (generation === this.lifecycleGeneration) {
+          this.patch({
+            status: 'faulted',
+            error: `${reason}; stop failed: ${messageOf(error)}`,
+          })
+        }
+        return
+      }
+      if (generation === this.lifecycleGeneration) {
+        this.patch({ status: 'faulted', state: 'IDLE', error: reason })
+      }
+    })
+  }
+
+  private beginStopping(operation: () => Promise<void>): Promise<void> {
+    if (this.stoppingPromise) return this.stoppingPromise
+    let resolve!: () => void
+    let reject!: (error: unknown) => void
+    const tracked = new Promise<void>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise
+      reject = rejectPromise
+    })
+    this.stoppingPromise = tracked
+    try {
+      operation().then(resolve, reject)
+    } catch (error) {
+      reject(error)
     }
-    if (generation === this.lifecycleGeneration) {
-      this.patch({ status: 'faulted', state: 'IDLE', error: reason })
-    }
+    void tracked.then(
+      () => {
+        if (this.stoppingPromise === tracked) this.stoppingPromise = undefined
+      },
+      () => {
+        if (this.stoppingPromise === tracked) this.stoppingPromise = undefined
+      },
+    )
+    return tracked
   }
 
   private async finishDisable(generation: number): Promise<void> {

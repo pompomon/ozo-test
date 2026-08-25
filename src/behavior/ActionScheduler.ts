@@ -110,6 +110,7 @@ export class ActionScheduler {
       }
     }
 
+    if (signal.aborted) outcome = 'cancelled'
     if (failure !== undefined) throw failure
     return outcome
   }
