@@ -43,7 +43,9 @@ function useBehaviorRuntime(runtime: BehaviorRuntime): BehaviorRuntimeSnapshot {
   useEffect(() => runtime.subscribe(setSnapshot), [runtime])
   useEffect(() => {
     runtime.start()
-    return () => runtime.stop()
+    return () => {
+      void runtime.stop().catch(() => undefined)
+    }
   }, [runtime])
   return snapshot
 }

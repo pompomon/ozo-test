@@ -107,4 +107,16 @@ describe('TelemetryEventSource', () => {
       expect.objectContaining({ type: 'PICKED_UP' }),
     ])
   })
+
+  it('uses the injected clock time for stale sample checks', () => {
+    const source = new TelemetryEventSource(
+      createBehaviorConfig({ sensorStaleMs: 1_000 }),
+      { now: () => 0 },
+    )
+    source.ingest(sensors(10_000), 100)
+    expect(source.checkStale(1_101)).toMatchObject({
+      type: 'SENSOR_STALE',
+      lastReceivedAt: 100,
+    })
+  })
 })

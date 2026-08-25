@@ -212,21 +212,20 @@ export class BehaviorRuntime {
     this.enqueueEvent({ type: 'DANCE_REQUESTED', at: this.clock.now() })
   }
 
-  stop(): void {
-    this.lifecycleGeneration += 1
-    this.stopAutonomyInputs()
-    this.engine.stop()
+  async stop(): Promise<void> {
     this.unsubscribeController?.()
     this.unsubscribeController = undefined
-    void this.scheduler.cancel().catch(() => undefined)
-    this.patch({ status: 'disabled', state: 'IDLE', error: undefined })
+    await this.disable()
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     if (this.disposed) return
-    this.stop()
     this.disposed = true
-    this.listeners.clear()
+    try {
+      await this.stop()
+    } finally {
+      this.listeners.clear()
+    }
   }
 
   private handleSensors(sensors: ReactiveSensors): void {

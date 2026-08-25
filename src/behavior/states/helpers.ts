@@ -52,8 +52,12 @@ export function isNear(value: number, config: BehaviorConfig): boolean {
 export function rearIsClear(reading: ObstacleReading | undefined, config: BehaviorConfig): boolean {
   return (
     reading !== undefined &&
-    !isNear(reading.leftRear, config) &&
-    !isNear(reading.rightRear, config)
+    (config.nearerIsHigher
+      ? reading.leftRear <= config.obstacleClearThreshold
+      : reading.leftRear >= config.obstacleClearThreshold) &&
+    (config.nearerIsHigher
+      ? reading.rightRear <= config.obstacleClearThreshold
+      : reading.rightRear >= config.obstacleClearThreshold)
   )
 }
 

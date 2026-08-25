@@ -67,7 +67,7 @@ export class TelemetryEventSource {
 
   ingest(sensors: ReactiveSensors, at = this.clock.now()): readonly BehaviorEvent[] {
     const events: BehaviorEvent[] = []
-    this.lastReceivedAt = sensors.receivedAt
+    this.lastReceivedAt = at
     this.staleEmitted = false
 
     if (!this.initialized) {

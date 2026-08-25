@@ -131,6 +131,23 @@ describe('BehaviorEngine', () => {
     expect(decision?.actions.some((action) => action.type === 'DRIVE')).toBe(false)
   })
 
+  it('does not escape through rear readings in the hysteresis band', () => {
+    const clock = testClock()
+    const engine = new BehaviorEngine(
+      createBehaviorConfig({ movementEnabled: true, repeatedObstacleCount: 2 }),
+      clock,
+      new SeededRandom(5),
+    )
+    engine.start()
+    const reading = { leftRear: 60, leftFront: 90, rightRear: 60, rightFront: 20 }
+    const scared = engine.handleEvent({ type: 'OBSTACLE_DETECTED', reading, at: 1 })
+    const angry = engine.handleEvent({ type: 'OBSTACLE_DETECTED', reading, at: 2 })
+    expect(scared?.transition?.to).toBe('SCARED')
+    expect(scared?.actions.some((action) => action.type === 'DRIVE')).toBe(false)
+    expect(angry?.transition?.to).toBe('ANGRY')
+    expect(angry?.actions.some((action) => action.type === 'DRIVE')).toBe(false)
+  })
+
   it('produces repeatable plans from a seeded random source', () => {
     const config = createBehaviorConfig({ movementEnabled: true })
     const clock = testClock()
