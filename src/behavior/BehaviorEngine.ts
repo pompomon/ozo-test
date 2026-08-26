@@ -161,6 +161,8 @@ export class BehaviorEngine {
         ...this.obstacleDetections.filter((detectedAt) => detectedAt >= earliest),
         event.at,
       ]
+    } else if (event.type === 'OBSTACLE_UPDATED') {
+      this.obstacle = event.reading
     } else if (event.type === 'OBSTACLE_CLEARED') {
       this.obstacleActive = false
       this.obstacle = event.reading

@@ -53,6 +53,11 @@ export type BehaviorEvent =
       readonly reading: ObstacleReading
     }
   | {
+      readonly type: 'OBSTACLE_UPDATED'
+      readonly at: number
+      readonly reading: ObstacleReading
+    }
+  | {
       readonly type: 'OBSTACLE_CLEARED'
       readonly at: number
       readonly reading: ObstacleReading

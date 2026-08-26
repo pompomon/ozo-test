@@ -46,7 +46,9 @@ describe('TelemetryEventSource', () => {
     expect(source.ingest(sensors(2, { leftFront: 91 }))).toEqual([
       expect.objectContaining({ type: 'OBSTACLE_DETECTED' }),
     ])
-    expect(source.ingest(sensors(3, { leftFront: 50 }))).toEqual([])
+    expect(source.ingest(sensors(3, { leftFront: 50 }))).toEqual([
+      expect.objectContaining({ type: 'OBSTACLE_UPDATED' }),
+    ])
     expect(source.ingest(sensors(4, { leftFront: 49 }))).toEqual([
       expect.objectContaining({ type: 'OBSTACLE_CLEARED' }),
     ])
@@ -83,11 +85,26 @@ describe('TelemetryEventSource', () => {
     source.ingest(sensors(0))
     source.ingest(sensors(1, { leftFront: 90 }))
     source.ingest(sensors(2, { leftFront: 91 }))
-    expect(source.ingest(sensors(3, { leftFront: 91, leftRear: 90 }))).toEqual([])
+    expect(source.ingest(sensors(3, { leftFront: 91, leftRear: 90 }))).toEqual([
+      expect.objectContaining({ type: 'OBSTACLE_UPDATED' }),
+    ])
     expect(source.ingest(sensors(4, { leftFront: 91, leftRear: 91 }))).toEqual([
       expect.objectContaining({
         type: 'OBSTACLE_DETECTED',
         reading: expect.objectContaining({ leftRear: 91 }),
+      }),
+    ])
+  })
+
+  it('updates active hazards with rear readings in the hysteresis band', () => {
+    const source = new TelemetryEventSource(createBehaviorConfig(), { now: () => 0 })
+    source.ingest(sensors(0))
+    source.ingest(sensors(1, { leftFront: 90 }))
+    source.ingest(sensors(2, { leftFront: 91 }))
+    expect(source.ingest(sensors(3, { leftFront: 91, leftRear: 60 }))).toEqual([
+      expect.objectContaining({
+        type: 'OBSTACLE_UPDATED',
+        reading: expect.objectContaining({ leftRear: 60 }),
       }),
     ])
   })

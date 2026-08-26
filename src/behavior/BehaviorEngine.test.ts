@@ -148,6 +148,28 @@ describe('BehaviorEngine', () => {
     expect(angry?.actions.some((action) => action.type === 'DRIVE')).toBe(false)
   })
 
+  it('uses updated active-hazard readings for repeated escape plans', () => {
+    const clock = testClock()
+    const engine = new BehaviorEngine(
+      createBehaviorConfig({ movementEnabled: true }),
+      clock,
+      new SeededRandom(5),
+    )
+    engine.start()
+    engine.handleEvent({
+      type: 'OBSTACLE_DETECTED',
+      reading: { leftRear: 0, leftFront: 90, rightRear: 0, rightFront: 20 },
+      at: 1,
+    })
+    expect(engine.handleEvent({
+      type: 'OBSTACLE_UPDATED',
+      reading: { leftRear: 60, leftFront: 90, rightRear: 60, rightFront: 20 },
+      at: 2,
+    })).toBeUndefined()
+    const repeated = engine.handleEvent({ type: 'STATE_COMPLETED', state: 'SCARED', at: 3 })
+    expect(repeated?.actions.some((action) => action.type === 'DRIVE')).toBe(false)
+  })
+
   it('produces repeatable plans from a seeded random source', () => {
     const config = createBehaviorConfig({ movementEnabled: true })
     const clock = testClock()

@@ -46,6 +46,7 @@ export class BehaviorRuntime {
   private tickTimer?: ReturnType<typeof setTimeout>
   private eventChain: Promise<void> = Promise.resolve()
   private startupEvents: BehaviorEvent[] = []
+  private startupPolling?: Promise<void>
   private lifecycleGeneration = 0
   private stoppingPromise?: Promise<void>
   private disposed = false
@@ -102,19 +103,26 @@ export class BehaviorRuntime {
       if (this.controller.snapshot.phase !== 'armed') {
         throw new Error('Motor control ended while personality mode was starting')
       }
-      this.stopReactivePolling = await this.controller.startReactiveSensorPolling(
+      const startupPolling = this.controller.startReactiveSensorPolling(
         (sensors) => this.handleSensors(sensors),
         () => this.handleSensorReadFailure(),
         this.config.reactiveSensorIntervalMs,
-      )
-      if (
-        generation !== this.lifecycleGeneration ||
-        this.controller.snapshot.phase !== 'armed' ||
-        this.snapshotValue.status !== 'starting'
-      ) {
-        this.stopReactivePolling()
-        this.stopReactivePolling = undefined
-        throw new Error('Personality mode was interrupted while starting')
+      ).then((stopReactivePolling) => {
+        if (
+          generation !== this.lifecycleGeneration ||
+          this.controller.snapshot.phase !== 'armed' ||
+          this.snapshotValue.status !== 'starting'
+        ) {
+          stopReactivePolling()
+          throw new Error('Personality mode was interrupted while starting')
+        }
+        this.stopReactivePolling = stopReactivePolling
+      })
+      this.startupPolling = startupPolling
+      try {
+        await startupPolling
+      } finally {
+        if (this.startupPolling === startupPolling) this.startupPolling = undefined
       }
 
       const decision = this.engine.start()
@@ -400,6 +408,8 @@ export class BehaviorRuntime {
 
   private async finishDisable(generation: number): Promise<void> {
     try {
+      const startupPolling = this.startupPolling
+      if (startupPolling) await startupPolling.catch(() => undefined)
       await this.scheduler.cancel()
       if (generation === this.lifecycleGeneration) {
         this.patch({ status: 'disabled', state: 'IDLE', error: undefined })

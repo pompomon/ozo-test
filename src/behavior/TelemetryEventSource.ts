@@ -156,12 +156,14 @@ export class TelemetryEventSource {
     }
 
     this.obstacleSamples = 0
+    let detectionEmitted = false
     if (rearNear && !this.rearObstacleActive) {
       this.rearObstacleSamples += 1
       if (this.rearObstacleSamples >= this.config.obstacleDebounceSamples) {
         this.rearObstacleActive = true
         this.rearObstacleSamples = 0
         events.push({ type: 'OBSTACLE_DETECTED', at, reading })
+        detectionEmitted = true
       }
     } else if (!rearNear) {
       this.rearObstacleSamples = 0
@@ -176,6 +178,8 @@ export class TelemetryEventSource {
       this.rearObstacleActive = false
       this.clearSamples = 0
       events.push({ type: 'OBSTACLE_CLEARED', at, reading })
+    } else if (!detectionEmitted) {
+      events.push({ type: 'OBSTACLE_UPDATED', at, reading })
     }
   }
 }

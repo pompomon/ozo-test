@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useCallback, useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { BehaviorRuntime } from './behavior/BehaviorRuntime.ts'
 import type { BehaviorRuntimeSnapshot } from './behavior/types.ts'
 import { EvoController, type ControllerSnapshot } from './controller/EvoController.ts'
@@ -75,6 +75,13 @@ export default function App({
   const manualControlsEnabled = controlsEnabled && !autonomous
   const manualDriveEnabled = armed && !autonomous
 
+  const run = useCallback((action: () => Promise<void>): void => {
+    setActionError(undefined)
+    void action().catch((error: unknown) => {
+      setActionError(error instanceof Error ? error.message : String(error))
+    })
+  }, [])
+
   useEffect(() => controller.installSafetyHandlers(), [controller])
 
   useEffect(() => {
@@ -100,7 +107,7 @@ export default function App({
       const key = event.key.toLowerCase()
       if (key === ' ') {
         event.preventDefault()
-        void behaviorRuntime.emergencyStop('Emergency stop pressed with Space')
+        run(() => behaviorRuntime.emergencyStop('Emergency stop pressed with Space'))
         return
       }
       if (!manualDriveEnabled || !movementKeys.has(key)) return
@@ -121,7 +128,7 @@ export default function App({
       window.removeEventListener('keydown', keyDown)
       window.removeEventListener('keyup', keyUp)
     }
-  }, [armed, behaviorRuntime, controller, manualDriveEnabled])
+  }, [armed, behaviorRuntime, controller, manualDriveEnabled, run])
 
   const status = useMemo(() => {
     switch (snapshot.phase) {
@@ -136,13 +143,6 @@ export default function App({
       case 'error': return 'Connection error'
     }
   }, [snapshot.phase])
-
-  const run = (action: () => Promise<void>): void => {
-    setActionError(undefined)
-    void action().catch((error: unknown) => {
-      setActionError(error instanceof Error ? error.message : String(error))
-    })
-  }
 
   const updateWheel = (side: 'left' | 'right', value: number): void => {
     if (!manualDriveEnabled) return

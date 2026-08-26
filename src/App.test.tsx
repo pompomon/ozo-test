@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { BehaviorRuntime } from './behavior/BehaviorRuntime.ts'
 import { EvoController } from './controller/EvoController.ts'
 import { EVO_3_PROFILE, LEGACY_PROFILE } from './protocol/profile.ts'
 import { readMessageId } from './protocol/modernCodec.ts'
@@ -107,5 +108,21 @@ describe('Evo Control UI', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Emergency stop' })).toBeEnabled()
     })
+  })
+
+  it('reports keyboard emergency-stop failures', async () => {
+    const controller = new EvoController(
+      new FakeTransport(EVO_3_PROFILE, createModernResponder()),
+    )
+    const runtime = new BehaviorRuntime(controller)
+    controllers.push(controller)
+    await controller.connect()
+    await controller.arm()
+    vi.spyOn(runtime, 'emergencyStop').mockRejectedValue(new Error('Stop failed'))
+    render(<App controller={controller} behaviorRuntime={runtime} />)
+
+    fireEvent.keyDown(window, { key: ' ' })
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Stop failed')
   })
 })

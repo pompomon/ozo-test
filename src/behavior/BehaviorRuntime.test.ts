@@ -79,6 +79,34 @@ describe('BehaviorRuntime', () => {
     expect(runtime.snapshot.status).toBe('disabled')
   })
 
+  it('waits for startup polling to stop before releasing ownership', async () => {
+    const { runtime, controller } = await connectedRuntime()
+    let finishStartup!: (stop: () => void) => void
+    const stopPolling = vi.fn()
+    vi.spyOn(controller, 'startReactiveSensorPolling').mockReturnValue(
+      new Promise((resolve) => {
+        finishStartup = resolve
+      }),
+    )
+
+    const enabling = runtime.enable()
+    await vi.waitFor(() => expect(runtime.snapshot.status).toBe('starting'))
+    const disabling = runtime.disable()
+    let disabled = false
+    void disabling.then(() => {
+      disabled = true
+    })
+    await Promise.resolve()
+    expect(runtime.snapshot.status).toBe('stopping')
+    expect(disabled).toBe(false)
+
+    finishStartup(stopPolling)
+    await expect(enabling).rejects.toThrow(/interrupted/)
+    await disabling
+    expect(stopPolling).toHaveBeenCalledOnce()
+    expect(runtime.snapshot.status).toBe('disabled')
+  })
+
   it('waits for an in-progress emergency stop before stopping', async () => {
     let releaseStop!: () => void
     const blockedStop = new Promise<void>((resolve) => {
