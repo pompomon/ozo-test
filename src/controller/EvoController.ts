@@ -18,6 +18,7 @@ import {
   normalizeWheelSpeeds,
   type WheelSpeeds,
 } from './drive.ts'
+import { MIN_REACTIVE_SENSOR_INTERVAL_MS } from './constants.ts'
 
 export type ControllerPhase =
   | 'unsupported'
@@ -58,7 +59,6 @@ const DRIVE_REFRESH_MS = 100
 const DRIVE_WATCHDOG_MS = 250
 const DRIVE_TIMEOUT_FAILSAFE_THRESHOLD = 2
 const TELEMETRY_REFRESH_MS = 2_000
-const MIN_REACTIVE_SENSOR_INTERVAL_MS = 100
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
@@ -87,6 +87,7 @@ export class EvoController {
   private driveGeneration = 0
   private targetWheels: WheelSpeeds = { left: 0, right: 0 }
   private stopPromise?: Promise<void>
+  private shutdownPromise?: Promise<void>
   private diagnosticId = 0
   private safetyCleanup?: () => void
 
@@ -200,6 +201,8 @@ export class EvoController {
   async disconnect(): Promise<void> {
     if (this.snapshotValue.phase === 'armed') {
       await this.emergencyStop('Disconnect requested')
+    } else if (this.shutdownPromise) {
+      await this.shutdownPromise
     }
     this.stopTelemetry()
     this.stopReactiveSensorPolling()
@@ -244,7 +247,12 @@ export class EvoController {
   }
 
   async disarm(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise
     if (this.snapshotValue.phase !== 'armed') return
+    return this.trackShutdown(this.finishDisarm())
+  }
+
+  private async finishDisarm(): Promise<void> {
     this.stopReactiveSensorPolling()
     this.patch({ phase: 'stopping', wheels: { left: 0, right: 0 } })
     let stopFailure: string | undefined
@@ -300,6 +308,10 @@ export class EvoController {
   }
 
   async emergencyStop(reason = 'Emergency stop pressed'): Promise<void> {
+    return this.trackShutdown(this.finishEmergencyStop(reason))
+  }
+
+  private async finishEmergencyStop(reason: string): Promise<void> {
     const wasArmed = this.snapshotValue.phase === 'armed'
     this.stopReactiveSensorPolling()
     let stopFailure: string | undefined
@@ -328,6 +340,19 @@ export class EvoController {
       if (!stopFailure) this.startTelemetry()
     }
     this.log('warning', reason)
+  }
+
+  private trackShutdown(operation: Promise<void>): Promise<void> {
+    const previous = this.shutdownPromise
+    const tracked = previous
+      ? Promise.all([previous, operation]).then(() => undefined)
+      : operation
+    this.shutdownPromise = tracked
+    const clear = (): void => {
+      if (this.shutdownPromise === tracked) this.shutdownPromise = undefined
+    }
+    tracked.then(clear, clear)
+    return tracked
   }
 
   async setLights(mask: number, color: string, brightness: number): Promise<void> {

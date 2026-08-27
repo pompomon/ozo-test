@@ -1,4 +1,5 @@
 import type { Clock, RandomSource } from './types.ts'
+import { MIN_REACTIVE_SENSOR_INTERVAL_MS } from '../controller/constants.ts'
 
 export interface BehaviorConfig {
   readonly engineTickMs: number
@@ -113,7 +114,10 @@ export function createBehaviorConfig(overrides: Partial<BehaviorConfig> = {}): B
   if (config.sleepAfterMs <= config.boredAfterMs) {
     throw new RangeError('sleepAfterMs must be greater than boredAfterMs')
   }
-  if (config.sensorStaleMs <= config.reactiveSensorIntervalMs) {
+  if (
+    config.sensorStaleMs <=
+    Math.max(MIN_REACTIVE_SENSOR_INTERVAL_MS, Math.round(config.reactiveSensorIntervalMs))
+  ) {
     throw new RangeError('sensorStaleMs must be greater than reactiveSensorIntervalMs')
   }
   if (config.ambientMaxWaitMs < config.ambientMinWaitMs) {

@@ -202,6 +202,38 @@ describe('EvoController', () => {
     await controller.disconnect()
   })
 
+  it('awaits an in-flight disarm before disconnecting', async () => {
+    let blockStops = false
+    let releaseStop = (): void => undefined
+    const stopBlocked = new Promise<void>((resolve) => {
+      releaseStop = resolve
+    })
+    const responder = createModernResponder()
+    const transport = new FakeTransport(EVO_3_PROFILE, async (write, fake) => {
+      if (blockStops && readMessageId(write.data) === 120) await stopBlocked
+      await responder(write, fake)
+    })
+    const controller = new EvoController(transport)
+    await controller.connect()
+    await controller.arm()
+    blockStops = true
+
+    const disarm = controller.disarm()
+    await vi.waitFor(() => expect(controller.snapshot.phase).toBe('stopping'))
+    let repeatedDisarmSettled = false
+    const repeatedDisarm = controller.disarm().then(() => {
+      repeatedDisarmSettled = true
+    })
+    const disconnect = controller.disconnect()
+    await Promise.resolve()
+
+    expect(repeatedDisarmSettled).toBe(false)
+    expect(transport.connected).toBe(true)
+    releaseStop()
+    await Promise.all([disarm, repeatedDisarm, disconnect])
+    expect(controller.snapshot.phase).toBe('disconnected')
+  })
+
   it('redacts the selected device name from exported diagnostics', async () => {
     const transport = new FakeTransport(EVO_3_PROFILE, createModernResponder())
     const controller = new EvoController(transport)

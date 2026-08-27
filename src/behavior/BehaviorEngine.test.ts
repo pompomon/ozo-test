@@ -191,5 +191,9 @@ describe('BehaviorEngine', () => {
       reactiveSensorIntervalMs: 500,
       sensorStaleMs: 500,
     })).toThrow(/sensorStaleMs/)
+    expect(() => createBehaviorConfig({
+      reactiveSensorIntervalMs: 1,
+      sensorStaleMs: 50,
+    })).toThrow(/sensorStaleMs/)
   })
 })
