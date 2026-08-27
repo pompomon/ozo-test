@@ -39,7 +39,7 @@ export function Joystick({ disabled, onChange }: JoystickProps) {
   )
 
   const start = (event: ReactPointerEvent<HTMLDivElement>): void => {
-    if (disabled) return
+    if (disabled || activePointerRef.current !== undefined) return
     event.currentTarget.setPointerCapture(event.pointerId)
     activePointerRef.current = event.pointerId
     setActive(true)
@@ -51,11 +51,12 @@ export function Joystick({ disabled, onChange }: JoystickProps) {
   }
 
   const stop = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (event.pointerId !== activePointerRef.current) return
+    activePointerRef.current = undefined
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
     setActive(false)
-    activePointerRef.current = undefined
     setPosition({ x: 0, y: 0 })
     onChange(0, 0)
   }
