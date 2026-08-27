@@ -189,6 +189,8 @@ export class BehaviorRuntime {
   }
 
   async emergencyStop(reason = 'Emergency stop pressed'): Promise<void> {
+    const stopping = this.stoppingPromise
+    if (stopping) return this.escalateStopping(stopping, reason)
     return this.beginStopping(async () => {
       const generation = ++this.lifecycleGeneration
       this.patch({ status: 'stopping' })
@@ -406,6 +408,35 @@ export class BehaviorRuntime {
     return tracked
   }
 
+  private escalateStopping(stopping: Promise<void>, reason: string): Promise<void> {
+    const generation = ++this.lifecycleGeneration
+    const stop = this.controller.emergencyStop(reason)
+    const tracked = Promise.allSettled([stopping, stop]).then(([stoppingResult, stopResult]) => {
+      if (stoppingResult.status === 'rejected' || stopResult.status === 'rejected') {
+        const error =
+          stoppingResult.status === 'rejected' ? stoppingResult.reason : stopResult.status === 'rejected' ? stopResult.reason : undefined
+        const message = `Emergency stop cleanup failed: ${messageOf(error)}`
+        if (generation === this.lifecycleGeneration) {
+          this.patch({ status: 'faulted', error: message })
+        }
+        throw new Error(message)
+      }
+      if (generation === this.lifecycleGeneration) {
+        this.patch({ status: 'disabled', state: 'IDLE', error: undefined })
+      }
+    })
+    this.stoppingPromise = tracked
+    void tracked.then(
+      () => {
+        if (this.stoppingPromise === tracked) this.stoppingPromise = undefined
+      },
+      () => {
+        if (this.stoppingPromise === tracked) this.stoppingPromise = undefined
+      },
+    )
+    return tracked
+  }
+
   private async finishDisable(generation: number): Promise<void> {
     try {
       const startupPolling = this.startupPolling
@@ -415,7 +446,7 @@ export class BehaviorRuntime {
         this.patch({ status: 'disabled', state: 'IDLE', error: undefined })
       }
     } catch (error) {
-      if (generation !== this.lifecycleGeneration) return
+      if (generation !== this.lifecycleGeneration) throw error
       let message = `Could not stop personality mode safely: ${messageOf(error)}`
       try {
         await this.controller.emergencyStop('Personality cleanup failed')
