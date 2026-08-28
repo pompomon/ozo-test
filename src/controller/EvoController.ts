@@ -26,6 +26,7 @@ export type ControllerPhase =
   | 'selecting'
   | 'connecting'
   | 'ready'
+  | 'arming'
   | 'armed'
   | 'stopping'
   | 'incompatible'
@@ -85,6 +86,7 @@ export class EvoController {
   private sensorReadChain: Promise<void> = Promise.resolve()
   private driveLoopActive = false
   private driveGeneration = 0
+  private armingGeneration = 0
   private targetWheels: WheelSpeeds = { left: 0, right: 0 }
   private stopPromise?: Promise<void>
   private shutdownPromise?: Promise<void>
@@ -199,6 +201,9 @@ export class EvoController {
   }
 
   async disconnect(): Promise<void> {
+    if (this.snapshotValue.phase === 'arming') {
+      this.armingGeneration += 1
+    }
     if (this.snapshotValue.phase === 'armed') {
       await this.emergencyStop('Disconnect requested')
     } else if (this.shutdownPromise) {
@@ -232,15 +237,28 @@ export class EvoController {
     ) {
       return
     }
+    const generation = ++this.armingGeneration
+    this.patch({ phase: 'arming', error: undefined })
     if (!(await this.lock.acquire())) {
+      if (generation !== this.armingGeneration) return
       this.patch({ error: 'Another tab already holds motor control.' })
       this.log('warning', 'Motor arming denied because another tab has control')
+      return
+    }
+    if (generation !== this.armingGeneration) {
+      this.lock.release()
+      await this.releaseWakeLock()
       return
     }
     try {
       this.wakeLock = await navigator.wakeLock?.request('screen')
     } catch {
       this.log('warning', 'Screen wake lock is unavailable; keep this page visible')
+    }
+    if (generation !== this.armingGeneration) {
+      this.lock.release()
+      await this.releaseWakeLock()
+      return
     }
     this.patch({ phase: 'armed', error: undefined })
     this.log('warning', 'Motors armed')
@@ -308,17 +326,19 @@ export class EvoController {
   }
 
   async emergencyStop(reason = 'Emergency stop pressed'): Promise<void> {
+    this.armingGeneration += 1
     return this.trackShutdown(this.finishEmergencyStop(reason))
   }
 
   private async finishEmergencyStop(reason: string): Promise<void> {
     const wasArmed = this.snapshotValue.phase === 'armed'
+    const wasArming = this.snapshotValue.phase === 'arming'
     this.stopReactiveSensorPolling()
     let stopFailure: string | undefined
     this.targetWheels = { left: 0, right: 0 }
     this.driveGeneration += 1
     this.transport.clearQueued('movement')
-    if (wasArmed) {
+    if (wasArmed || wasArming) {
       this.patch({ phase: 'stopping', wheels: { left: 0, right: 0 } })
     }
     try {
@@ -329,7 +349,7 @@ export class EvoController {
     }
     this.lock.release()
     await this.releaseWakeLock()
-    if (wasArmed && this.transport.connected) {
+    if (this.transport.connected && (wasArmed || wasArming)) {
       this.patch({
         phase: stopFailure ? 'error' : 'ready',
         error: stopFailure
@@ -580,6 +600,7 @@ export class EvoController {
   }
 
   private handleUnexpectedDisconnect(reason?: Error): void {
+    this.armingGeneration += 1
     this.stopTelemetry()
     this.stopReactiveSensorPolling()
     this.driveGeneration += 1

@@ -180,6 +180,42 @@ describe('EvoController', () => {
     })
   })
 
+  it('cancels a pending arm if shutdown starts while arming', async () => {
+    const transport = new FakeTransport(EVO_3_PROFILE, createModernResponder())
+    const controller = new EvoController(transport)
+    await controller.connect()
+
+    const previousWakeLock = navigator.wakeLock
+    let resolveWakeLock!: (lock: { released: boolean; release: () => Promise<void> }) => void
+    const wakeLockRequest = new Promise<{ released: boolean; release: () => Promise<void> }>((resolve) => {
+      resolveWakeLock = resolve
+    })
+    Object.defineProperty(navigator, 'wakeLock', {
+      configurable: true,
+      value: { request: vi.fn(() => wakeLockRequest) },
+    })
+
+    try {
+      const arm = controller.arm()
+      await vi.waitFor(() => expect(controller.snapshot.phase).toBe('arming'))
+      const stopping = controller.emergencyStop()
+      resolveWakeLock({ released: false, release: async () => undefined })
+      await stopping
+      await arm
+      expect(controller.snapshot.phase).toBe('ready')
+    } finally {
+      if (previousWakeLock === undefined) {
+        Reflect.deleteProperty(navigator, 'wakeLock')
+      } else {
+        Object.defineProperty(navigator, 'wakeLock', {
+          configurable: true,
+          value: previousWakeLock,
+        })
+      }
+      await controller.disconnect()
+    }
+  })
+
   it('locks controls if a disarm stop is not acknowledged', async () => {
     let failStops = false
     const responder = createModernResponder()
