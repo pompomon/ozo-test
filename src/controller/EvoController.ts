@@ -241,7 +241,7 @@ export class EvoController {
     this.patch({ phase: 'arming', error: undefined })
     if (!(await this.lock.acquire())) {
       if (generation !== this.armingGeneration) return
-      this.patch({ error: 'Another tab already holds motor control.' })
+      this.patch({ phase: 'ready', error: 'Another tab already holds motor control.' })
       this.log('warning', 'Motor arming denied because another tab has control')
       return
     }

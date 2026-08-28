@@ -67,9 +67,9 @@ export default function App({
   const [toneDuration, setToneDuration] = useState(500)
   const [actionError, setActionError] = useState<string>()
   const armed = snapshot.phase === 'armed'
-  const motorsBusy = armed || snapshot.phase === 'stopping'
+  const motorsBusy = ['arming', 'armed', 'stopping'].includes(snapshot.phase)
   const pwa = usePwa(motorsBusy)
-  const connected = ['connecting', 'ready', 'armed', 'stopping', 'incompatible'].includes(snapshot.phase)
+  const connected = ['connecting', 'ready', 'arming', 'armed', 'stopping', 'incompatible'].includes(snapshot.phase)
   const controlsEnabled = ['ready', 'armed'].includes(snapshot.phase)
   const autonomous = ['starting', 'running', 'stopping'].includes(behavior.status)
   const manualControlsEnabled = controlsEnabled && !autonomous
@@ -137,6 +137,7 @@ export default function App({
       case 'selecting': return 'Choose an Evo'
       case 'connecting': return 'Detecting firmware'
       case 'ready': return 'Connected · safe'
+      case 'arming': return 'Arming motors'
       case 'armed': return 'Motors armed'
       case 'stopping': return 'Stopping motors'
       case 'incompatible': return 'Unsupported firmware'

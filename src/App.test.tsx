@@ -110,6 +110,37 @@ describe('Evo Control UI', () => {
     })
   })
 
+  it('stays connected while motor arming is pending', async () => {
+    const controller = new EvoController(
+      new FakeTransport(EVO_3_PROFILE, createModernResponder()),
+    )
+    controllers.push(controller)
+    await controller.connect()
+    const previousWakeLock = navigator.wakeLock
+    Object.defineProperty(navigator, 'wakeLock', {
+      configurable: true,
+      value: { request: vi.fn(() => new Promise(() => undefined)) },
+    })
+
+    try {
+      render(<App controller={controller} />)
+      fireEvent.click(screen.getByRole('button', { name: 'Arm motors' }))
+
+      expect(await screen.findByText('Arming motors')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Disconnect' })).toBeEnabled()
+      expect(screen.getByRole('button', { name: 'Emergency stop' })).toBeEnabled()
+    } finally {
+      if (previousWakeLock === undefined) {
+        Reflect.deleteProperty(navigator, 'wakeLock')
+      } else {
+        Object.defineProperty(navigator, 'wakeLock', {
+          configurable: true,
+          value: previousWakeLock,
+        })
+      }
+    }
+  })
+
   it('reports keyboard emergency-stop failures', async () => {
     const controller = new EvoController(
       new FakeTransport(EVO_3_PROFILE, createModernResponder()),

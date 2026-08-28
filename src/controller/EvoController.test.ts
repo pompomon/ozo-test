@@ -216,6 +216,39 @@ describe('EvoController', () => {
     }
   })
 
+  it('returns to ready when another tab holds motor control', async () => {
+    const transport = new FakeTransport(EVO_3_PROFILE, createModernResponder())
+    const controller = new EvoController(transport)
+    await controller.connect()
+    const previousLocks = navigator.locks
+    Object.defineProperty(navigator, 'locks', {
+      configurable: true,
+      value: {
+        request: vi.fn(async (_name, _options, callback) => callback(null)),
+      },
+    })
+
+    try {
+      await controller.arm()
+      expect(controller.snapshot).toMatchObject({
+        phase: 'ready',
+        error: 'Another tab already holds motor control.',
+      })
+      await controller.arm()
+      expect(controller.snapshot.phase).toBe('ready')
+    } finally {
+      if (previousLocks === undefined) {
+        Reflect.deleteProperty(navigator, 'locks')
+      } else {
+        Object.defineProperty(navigator, 'locks', {
+          configurable: true,
+          value: previousLocks,
+        })
+      }
+      await controller.disconnect()
+    }
+  })
+
   it('locks controls if a disarm stop is not acknowledged', async () => {
     let failStops = false
     const responder = createModernResponder()
