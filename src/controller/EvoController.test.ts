@@ -216,6 +216,44 @@ describe('EvoController', () => {
     }
   })
 
+  it('cancels a pending arm when focus is lost while arming', async () => {
+    const transport = new FakeTransport(EVO_3_PROFILE, createModernResponder())
+    const controller = new EvoController(transport)
+    await controller.connect()
+
+    const previousWakeLock = navigator.wakeLock
+    let resolveWakeLock!: (lock: { released: boolean; release: () => Promise<void> }) => void
+    const wakeLockRequest = new Promise<{ released: boolean; release: () => Promise<void> }>((resolve) => {
+      resolveWakeLock = resolve
+    })
+    Object.defineProperty(navigator, 'wakeLock', {
+      configurable: true,
+      value: { request: vi.fn(() => wakeLockRequest) },
+    })
+
+    try {
+      controller.installSafetyHandlers()
+      const arm = controller.arm()
+      await vi.waitFor(() => expect(controller.snapshot.phase).toBe('arming'))
+      const stop = controller.emergencyStop('Control focus was lost')
+      window.dispatchEvent(new Event('blur'))
+      resolveWakeLock({ released: false, release: async () => undefined })
+      await stop
+      await arm
+      expect(controller.snapshot.phase).toBe('ready')
+    } finally {
+      if (previousWakeLock === undefined) {
+        Reflect.deleteProperty(navigator, 'wakeLock')
+      } else {
+        Object.defineProperty(navigator, 'wakeLock', {
+          configurable: true,
+          value: previousWakeLock,
+        })
+      }
+      await controller.disconnect()
+    }
+  })
+
   it('returns to ready when another tab holds motor control', async () => {
     const transport = new FakeTransport(EVO_3_PROFILE, createModernResponder())
     const controller = new EvoController(transport)

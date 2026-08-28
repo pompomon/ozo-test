@@ -121,7 +121,7 @@ export class EvoController {
   installSafetyHandlers(): () => void {
     if (this.safetyCleanup) return this.safetyCleanup
     const loseControl = (): void => {
-      if (this.snapshotValue.phase === 'armed') {
+      if (this.snapshotValue.phase === 'arming' || this.snapshotValue.phase === 'armed') {
         void this.emergencyStop('Control focus was lost')
       }
     }
@@ -250,16 +250,20 @@ export class EvoController {
       await this.releaseWakeLock()
       return
     }
+    let requestedWakeLock: WakeLockSentinel | undefined
     try {
-      this.wakeLock = await navigator.wakeLock?.request('screen')
+      requestedWakeLock = await navigator.wakeLock?.request('screen')
     } catch {
       this.log('warning', 'Screen wake lock is unavailable; keep this page visible')
     }
     if (generation !== this.armingGeneration) {
       this.lock.release()
-      await this.releaseWakeLock()
+      if (requestedWakeLock && !requestedWakeLock.released) {
+        await requestedWakeLock.release()
+      }
       return
     }
+    this.wakeLock = requestedWakeLock
     this.patch({ phase: 'armed', error: undefined })
     this.log('warning', 'Motors armed')
   }

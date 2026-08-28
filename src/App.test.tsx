@@ -85,6 +85,7 @@ describe('Evo Control UI', () => {
 
     expect(screen.getByRole('application', { name: 'Drive joystick' }))
       .toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByRole('application', { name: 'Drive joystick' })).toHaveTextContent('Return to manual')
     expect(screen.getByRole('button', { name: 'Apply lights' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Dance' })).toBeEnabled()
 

@@ -276,6 +276,7 @@ export default function App({
             </div>
             <Joystick
               disabled={!manualDriveEnabled}
+              disabledLabel={autonomous ? 'Return to manual' : 'Arm motors'}
               onChange={(x, y) => {
                 if (!manualDriveEnabled) return
                 const wheels = mixJoystick(x, y)

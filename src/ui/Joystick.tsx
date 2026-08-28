@@ -8,6 +8,7 @@ import {
 
 interface JoystickProps {
   readonly disabled: boolean
+  readonly disabledLabel?: string
   readonly onChange: (x: number, y: number) => void
 }
 
@@ -16,7 +17,7 @@ interface Position {
   readonly y: number
 }
 
-export function Joystick({ disabled, onChange }: JoystickProps) {
+export function Joystick({ disabled, disabledLabel = 'Arm motors', onChange }: JoystickProps) {
   const surfaceRef = useRef<HTMLDivElement>(null)
   const activePointerRef = useRef<number | undefined>(undefined)
   const [position, setPosition] = useState<Position>({ x: 0, y: 0 })
@@ -94,7 +95,7 @@ export function Joystick({ disabled, onChange }: JoystickProps) {
           transform: `translate(calc(-50% + ${position.x * 74}px), calc(-50% + ${-position.y * 74}px))`,
         }}
       />
-      <span className="joystick__label">{disabled ? 'Arm motors' : 'Drag to drive'}</span>
+      <span className="joystick__label">{disabled ? disabledLabel : 'Drag to drive'}</span>
     </div>
   )
 }
