@@ -1,0 +1,1 @@
+export const MIN_REACTIVE_SENSOR_INTERVAL_MS = 100

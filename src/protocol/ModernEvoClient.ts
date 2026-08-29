@@ -27,12 +27,14 @@ import {
   parseIrMessage,
   parseLineColor,
   parseLineSensors,
+  parsePickup,
   parsePosition,
   parseProcessedColor,
   parseProximity,
   parseSurface,
   parseSurfaceColor,
   type EvoTelemetry,
+  type ReactiveSensors,
 } from './telemetry.ts'
 
 interface PendingRequest {
@@ -285,6 +287,20 @@ export class ModernEvoClient {
         rightRear: parseIrMessage(irRightRearBytes),
         rightFront: parseIrMessage(irRightFrontBytes),
       },
+      receivedAt: Date.now(),
+    }
+  }
+
+  async readReactiveSensors(): Promise<ReactiveSensors> {
+    const [proximityBytes, pickupBytes, buttonBytes] = await Promise.all([
+      this.readRegion(MEMORY_REGION.proximity),
+      this.readRegion(MEMORY_REGION.pickup),
+      this.readRegion(MEMORY_REGION.button),
+    ])
+    return {
+      proximity: parseProximity(proximityBytes),
+      pickup: parsePickup(pickupBytes),
+      button: parseButton(buttonBytes),
       receivedAt: Date.now(),
     }
   }

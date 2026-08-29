@@ -4,6 +4,10 @@ export interface Timestamped {
   readonly timestamp: number
 }
 
+export interface PickupState extends Timestamped {
+  readonly pickedUp: boolean
+}
+
 export interface EvoTelemetry {
   readonly firmware: string
   readonly firmwareRawMajor: number
@@ -67,6 +71,13 @@ export interface EvoTelemetry {
     readonly message: number
     readonly intensity: number
   }>>
+  readonly receivedAt: number
+}
+
+export interface ReactiveSensors {
+  readonly proximity: EvoTelemetry['proximity']
+  readonly pickup: PickupState
+  readonly button: EvoTelemetry['button']
   readonly receivedAt: number
 }
 
@@ -210,19 +221,27 @@ export function parseSurface(
 ): EvoTelemetry['surface'] {
   const typeView = viewOf(typeBytes, 5, 'Surface type')
   const proximityView = viewOf(proximityBytes, 6, 'Surface proximity')
-  const pickupView = viewOf(pickupBytes, 5, 'Pickup state')
-  if (pickupBytes[0] > 1) {
-    throw new RangeError(`Invalid pickup state ${pickupBytes[0]}`)
-  }
+  const pickup = parsePickup(pickupBytes)
   return {
     type: enumName(typeBytes[0], { 0: 'Paper', 1: 'Screen', 255: 'Unknown' }, 'Unknown'),
     proximity: proximityView.getUint16(0, true),
-    pickedUp: pickupBytes[0] === 1,
+    pickedUp: pickup.pickedUp,
     timestamp: Math.max(
       timestamp(typeView, 1),
       timestamp(proximityView, 2),
-      timestamp(pickupView, 1),
+      pickup.timestamp,
     ),
+  }
+}
+
+export function parsePickup(bytes: Uint8Array): PickupState {
+  const view = viewOf(bytes, 5, 'Pickup state')
+  if (bytes[0] > 1) {
+    throw new RangeError(`Invalid pickup state ${bytes[0]}`)
+  }
+  return {
+    pickedUp: bytes[0] === 1,
+    timestamp: timestamp(view, 1),
   }
 }
 
@@ -289,4 +308,3 @@ export function parseIrMessage(bytes: Uint8Array): EvoTelemetry['irMessages']['l
   const view = viewOf(bytes, 6, 'IR message')
   return { message: bytes[0], intensity: bytes[1], timestamp: timestamp(view, 2) }
 }
-
