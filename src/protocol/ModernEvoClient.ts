@@ -73,6 +73,8 @@ function toneQueueKey(requestId: number): string {
   return `tone:${requestId}`
 }
 
+const LED_QUEUE_KEY = 'led'
+
 function asError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value))
 }
@@ -165,6 +167,7 @@ export class ModernEvoClient {
   private priorityBarrier: Promise<void> = Promise.resolve()
   private readonly expectedLateResponses = new Map<string, number>()
   private readonly uncertainMemoryResponseLengths: number[] = []
+  private ledResponseUncertain = false
   private readonly audioExecutions = new Map<number, AudioExecutionTracker>()
   private readonly toneControllers = new Set<AbortController>()
   private readonly activeSoundRequestIds = new Set<number>()
@@ -260,9 +263,14 @@ export class ModernEvoClient {
     }
   }
 
-  async stopMovement(cancelOrdinaryRequests = false): Promise<void> {
+  async stopMovement(
+    cancelOrdinaryRequests = false,
+    clearQueuedTones = cancelOrdinaryRequests,
+  ): Promise<void> {
     if (cancelOrdinaryRequests) {
       this.cancelOrdinaryRequests()
+    }
+    if (clearQueuedTones) {
       for (const controller of this.toneControllers) controller.abort()
       for (const requestId of this.activeSoundRequestIds) {
         this.transport.clearQueued(toneQueueKey(requestId))
@@ -270,7 +278,7 @@ export class ModernEvoClient {
     }
     this.transport.clearQueued('movement')
     await this.stopExecution(0, true)
-    if (cancelOrdinaryRequests) {
+    if (clearQueuedTones) {
       this.activeSoundRequestIds.clear()
       for (const tracker of this.audioExecutions.values()) {
         tracker.reject(new RequestCancelledError())
@@ -281,15 +289,24 @@ export class ModernEvoClient {
   async setLed(mask: number, red: number, green: number, blue: number): Promise<void> {
     await this.runRpcExclusive(async (signal) => {
       this.throwIfAborted(signal)
-      const response = await this.request(
-        encodeSetLed(mask, red, green, blue),
-        MODERN_MESSAGE.setLedResponse,
-        undefined,
-        undefined,
-        2_500,
-        'LED',
-        signal,
-      )
+      if (this.ledResponseUncertain) await this.synchronizeLedResponses(signal)
+      let response: Uint8Array
+      try {
+        response = await this.request(
+          encodeSetLed(mask, red, green, blue),
+          MODERN_MESSAGE.setLedResponse,
+          undefined,
+          { replaceKey: LED_QUEUE_KEY },
+          2_500,
+          'LED',
+          signal,
+        )
+      } catch (error) {
+        if (error instanceof RequestCancelledError) {
+          this.transport.clearQueued(LED_QUEUE_KEY)
+        }
+        throw error
+      }
       this.throwIfAborted(signal)
       assertCallSucceeded(response, MODERN_MESSAGE.setLedResponse)
     })
@@ -763,6 +780,10 @@ export class ModernEvoClient {
       this.rememberExpectedLateResponse(responseKey(responseMessageId, requestId))
       return
     }
+    if (responseMessageId === MODERN_MESSAGE.setLedResponse) {
+      this.ledResponseUncertain = true
+      return
+    }
     if (responseMessageId !== MODERN_MESSAGE.memReadResponse) return
     const length = new DataView(
       requestPacket.buffer,
@@ -806,6 +827,26 @@ export class ModernEvoClient {
       throw new MemoryResponsePendingError()
     }
     this.uncertainMemoryResponseLengths.length = 0
+  }
+
+  private async synchronizeLedResponses(signal: AbortSignal): Promise<void> {
+    if (this.uncertainMemoryResponseLengths.length > 0) {
+      await this.synchronizeMemoryResponses(signal)
+    }
+    const response = await this.request(
+      encodeMemRead(0, 1),
+      MODERN_MESSAGE.memReadResponse,
+      undefined,
+      undefined,
+      MEMORY_RESPONSE_SYNC_TIMEOUT_MS,
+      'LED synchronization read',
+      signal,
+    )
+    const decoded = decodeMemReadResponse(response)
+    if (decoded.result !== 0 || decoded.data.length !== 1) {
+      throw new MemoryResponsePendingError()
+    }
+    this.ledResponseUncertain = false
   }
 
   private isRetryableMemoryReadError(error: unknown): boolean {

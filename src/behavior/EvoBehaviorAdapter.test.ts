@@ -4,6 +4,7 @@ import { EvoBehaviorAdapter, type BehaviorController } from './EvoBehaviorAdapte
 class FakeBehaviorController implements BehaviorController {
   readonly drives: { left: number; right: number }[] = []
   stops = 0
+  stopsWithQueuedSound = 0
   soundStops = 0
   lights = 0
   tones = 0
@@ -14,6 +15,10 @@ class FakeBehaviorController implements BehaviorController {
 
   async stopMotion(): Promise<void> {
     this.stops += 1
+  }
+
+  async stopMotionAndQueuedSound(): Promise<void> {
+    this.stopsWithQueuedSound += 1
   }
 
   async setLights(): Promise<void> {
@@ -72,7 +77,7 @@ describe('EvoBehaviorAdapter', () => {
     expect(controller.soundStops).toBe(0)
 
     await adapter.cleanup(true)
-    expect(controller.stops).toBe(1)
+    expect(controller.stopsWithQueuedSound).toBe(1)
     expect(controller.soundStops).toBe(1)
   })
 })

@@ -328,6 +328,17 @@ export class EvoController {
   }
 
   async stopMotion(cancelOrdinaryRequests = false): Promise<void> {
+    return this.stopMotionInternal(cancelOrdinaryRequests, cancelOrdinaryRequests)
+  }
+
+  async stopMotionAndQueuedSound(): Promise<void> {
+    return this.stopMotionInternal(false, true)
+  }
+
+  private async stopMotionInternal(
+    cancelOrdinaryRequests: boolean,
+    clearQueuedSound: boolean,
+  ): Promise<void> {
     this.targetWheels = { left: 0, right: 0 }
     this.driveGeneration += 1
     this.driveAbort?.abort()
@@ -335,9 +346,11 @@ export class EvoController {
     if (!this.client || !this.transport.connected) return
     if (cancelOrdinaryRequests) this.client.cancelOrdinaryRequests()
     if (this.stopPromise) return this.stopPromise
-    this.stopPromise = this.client.stopMovement(cancelOrdinaryRequests).finally(() => {
-      this.stopPromise = undefined
-    })
+    this.stopPromise = this.client
+      .stopMovement(cancelOrdinaryRequests, clearQueuedSound)
+      .finally(() => {
+        this.stopPromise = undefined
+      })
     return this.stopPromise
   }
 

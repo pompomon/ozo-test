@@ -3,6 +3,7 @@ import type { RobotAction, RobotActionPort } from './types.ts'
 export interface BehaviorController {
   setDrive(left: number, right: number): void
   stopMotion(): Promise<void>
+  stopMotionAndQueuedSound(): Promise<void>
   setLights(mask: number, color: string, brightness: number): Promise<void>
   playTone(frequencyHz: number, durationMs: number, signal?: AbortSignal): Promise<void>
   stopSound(): Promise<void>
@@ -78,7 +79,11 @@ export class EvoBehaviorAdapter implements RobotActionPort {
     let failure: unknown
     if (force || this.motionActive) {
       try {
-        await this.controller.stopMotion()
+        if (force) {
+          await this.controller.stopMotionAndQueuedSound()
+        } else {
+          await this.controller.stopMotion()
+        }
         this.motionActive = false
       } catch (error) {
         failure = error

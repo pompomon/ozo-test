@@ -371,7 +371,7 @@ describe('ModernEvoClient', () => {
     })
     const toneRequestId = requestIdOf(transport.writes[0].data)
 
-    await client.stopMovement(true)
+    await client.stopMovement(false, true)
 
     await expect(tone).resolves.toMatchObject({ name: 'RequestCancelledError' })
     expect(transport.clearedReplaceKeys).toContain(`tone:${toneRequestId}`)
@@ -497,6 +497,35 @@ describe('ModernEvoClient', () => {
       client.setLed(2, 4, 5, 6),
     ])
     expect(transport.writes.map((write) => readMessageId(write.data))).toEqual([110, 110])
+  })
+
+  it('clears a cancelled LED and synchronizes before the next LED', async () => {
+    let ledWrites = 0
+    const transport = new FakeTransport(undefined, ({ data }, fake) => {
+      const messageId = readMessageId(data)
+      if (messageId === 110) {
+        ledWrites += 1
+        if (ledWrites === 2) queueMicrotask(() => fake.emit(Uint8Array.of(111, 0, 0)))
+      }
+    })
+    await transport.connect()
+    const client = new ModernEvoClient(transport)
+    clients.push(client)
+
+    const cancelledLed = client.setLed(1, 1, 2, 3)
+    await vi.waitFor(() => expect(ledWrites).toBe(1))
+    client.cancelOrdinaryRequests()
+    await expect(cancelledLed).rejects.toThrow(/cancelled/)
+    expect(transport.clearedReplaceKeys).toContain('led')
+
+    const nextLed = client.setLed(2, 4, 5, 6)
+    await vi.waitFor(() => {
+      expect(transport.writes.map((write) => readMessageId(write.data))).toEqual([110, 1])
+    })
+    transport.emit(Uint8Array.of(111, 0, 0))
+    transport.emit(memoryResponse([0]))
+    await expect(nextLed).resolves.toBeUndefined()
+    expect(transport.writes.map((write) => readMessageId(write.data))).toEqual([110, 1, 110])
   })
 
   it('classifies a missing 105 acknowledgment as a movement timeout', async () => {
