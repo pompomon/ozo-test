@@ -2,9 +2,30 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { FakeTransport, createModernResponder } from '../test/FakeTransport.ts'
 import { TransportQueueCancelledError } from '../transport/EvoTransport.ts'
 import { ModernEvoClient, MovementSupersededError, MovementTimeoutError } from './ModernEvoClient.ts'
-import { readMessageId } from './modernCodec.ts'
+import { EXECUTION_STATE, readMessageId } from './modernCodec.ts'
 
 const clients: ModernEvoClient[] = []
+
+function requestIdOf(packet: Uint8Array): number {
+  return new DataView(packet.buffer, packet.byteOffset, packet.byteLength).getUint32(2, true)
+}
+
+function audioState(requestId: number, state: number): Uint8Array {
+  const packet = new Uint8Array(7)
+  const view = new DataView(packet.buffer)
+  view.setUint16(0, 259, true)
+  view.setUint32(2, requestId, true)
+  packet[6] = state
+  return packet
+}
+
+function requestResponse(messageId: number, requestId: number): Uint8Array {
+  const packet = new Uint8Array(6)
+  const view = new DataView(packet.buffer)
+  view.setUint16(0, messageId, true)
+  view.setUint32(2, requestId, true)
+  return packet
+}
 
 afterEach(() => {
   for (const client of clients.splice(0)) client.dispose()
@@ -83,10 +104,109 @@ describe('ModernEvoClient', () => {
       return { address: view.getUint32(2, true), length: view.getUint16(6, true) }
     })
     expect(reads).toEqual([
-      { address: 118, length: 8 },
-      { address: 113, length: 5 },
+      { address: 113, length: 13 },
       { address: 196, length: 5 },
     ])
+  })
+
+  it('stops a failed telemetry batch without running orphaned reads', async () => {
+    const transport = new FakeTransport(undefined, ({ data }, fake) => {
+      if (readMessageId(data) !== 1) return
+      queueMicrotask(() => fake.emit(Uint8Array.of(2, 0, 1, 0, 0)))
+    })
+    await transport.connect()
+    const client = new ModernEvoClient(transport)
+    clients.push(client)
+
+    await expect(client.readTelemetry()).rejects.toThrow(/status 1/)
+    expect(transport.writes.map((write) => readMessageId(write.data))).toEqual([1])
+  })
+
+  it('serializes complete short RPC transactions', async () => {
+    let releaseRead!: () => void
+    const blockedRead = new Promise<void>((resolve) => {
+      releaseRead = resolve
+    })
+    const responder = createModernResponder()
+    const transport = new FakeTransport(undefined, async (write, fake) => {
+      if (readMessageId(write.data) === 1) await blockedRead
+      await responder(write, fake)
+    })
+    await transport.connect()
+    const client = new ModernEvoClient(transport)
+    clients.push(client)
+
+    const sensors = client.readReactiveSafetySensors()
+    await vi.waitFor(() => expect(transport.writes).toHaveLength(1))
+    const led = client.setLed(1, 2, 3, 4)
+    await Promise.resolve()
+    expect(transport.writes.map((write) => readMessageId(write.data))).toEqual([1])
+
+    releaseRead()
+    await Promise.all([sensors, led])
+    expect(transport.writes.map((write) => readMessageId(write.data))).toEqual([1, 110])
+  })
+
+  it('uses a normal audio completion event when response 119 is lost', async () => {
+    const diagnostics: string[] = []
+    let toneRequestId = 0
+    const transport = new FakeTransport(undefined, ({ data }, fake) => {
+      if (readMessageId(data) !== 118) return
+      toneRequestId = requestIdOf(data)
+      queueMicrotask(() => fake.emit(audioState(toneRequestId, EXECUTION_STATE.running)))
+      queueMicrotask(() => fake.emit(audioState(toneRequestId, EXECUTION_STATE.finishedNormal)))
+    })
+    await transport.connect()
+    const client = new ModernEvoClient(transport, (message) => diagnostics.push(message))
+    clients.push(client)
+
+    await expect(client.playTone(392, 140)).resolves.toBeUndefined()
+    expect(await client.stopSound()).toBe(false)
+    transport.emit(requestResponse(119, toneRequestId))
+    expect(diagnostics).toEqual([])
+  })
+
+  it('rejects a correlated audio execution failure', async () => {
+    const transport = new FakeTransport(undefined, ({ data }, fake) => {
+      if (readMessageId(data) !== 118) return
+      queueMicrotask(() => fake.emit(
+        audioState(requestIdOf(data), EXECUTION_STATE.invalidRequest),
+      ))
+    })
+    await transport.connect()
+    const client = new ModernEvoClient(transport)
+    clients.push(client)
+
+    await expect(client.playTone(392, 140)).rejects.toThrow(/invalidRequest/)
+  })
+
+  it('preempts an ordinary RPC with a priority stop', async () => {
+    vi.useFakeTimers()
+    try {
+      const responder = createModernResponder()
+      const transport = new FakeTransport(undefined, async (write, fake) => {
+        if (readMessageId(write.data) === 1) return
+        await responder(write, fake)
+      })
+      await transport.connect()
+      const client = new ModernEvoClient(transport)
+      clients.push(client)
+      const telemetry = client.readTelemetry().catch((error: unknown) => error)
+      await vi.waitFor(() => {
+        expect(transport.writes.map((write) => readMessageId(write.data))).toEqual([1])
+      })
+
+      await client.stopMovement(true)
+      expect(transport.writes.map((write) => readMessageId(write.data))).toEqual([1, 120])
+      expect(transport.writes[1].options?.priority).toBe(true)
+
+      await vi.advanceTimersByTimeAsync(2_501)
+      await expect(telemetry).resolves.toMatchObject({
+        message: expect.stringContaining('response 2'),
+      })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('rejects unsolicited malformed notifications without breaking later requests', async () => {

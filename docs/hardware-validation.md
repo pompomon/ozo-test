@@ -39,6 +39,7 @@ Record the browser, operating system, Evo firmware, and result for each row. Do 
 - [ ] Record clear/near values for front-left, front-right, rear-left, and rear-right at several distances.
 - [ ] Choose detection and clear thresholds with enough hysteresis to avoid rapid state changes.
 - [ ] Confirm focused proximity/pickup/button polling remains responsive while LEDs and tones run.
+- [ ] Confirm a dropped focused safety response is retried without movement and a dropped button response does not stale safety data.
 - [ ] Raw and processed RGB values react to surfaces.
 - [ ] Line readings, surface type/color, and pickup state react correctly.
 - [ ] Wheel encoders and relative position change with motion.
@@ -69,6 +70,7 @@ Measure stop latency and require it to remain below the 250 ms movement duration
 ## Personality engine
 
 - [ ] Verify `IDLE`, `CURIOUS`, `EXCITED`, `SCARED`, `ANGRY`, `BORED`, `SLEEPING`, and `DANCING` transitions.
+- [ ] Confirm stationary dance plays 392 Hz, 523 Hz, and 659 Hz stages and reports correlated audio completion events.
 - [ ] Confirm repeated obstacle events escalate from `SCARED` to `ANGRY`.
 - [ ] Confirm only user/button interaction resets boredom and sleep timers.
 - [ ] Confirm **Return to manual**, disarm, disconnect, Space, and emergency stop cancel every action sequence.

@@ -182,6 +182,120 @@ describe('BehaviorRuntime', () => {
     })
   })
 
+  it('transitions from a busy idle plan to curious without false sensor staleness', async () => {
+    vi.useFakeTimers()
+    try {
+      const transport = new FakeTransport(EVO_3_PROFILE, createModernResponder())
+      const controller = new EvoController(transport)
+      const runtime = new BehaviorRuntime(controller, {
+        seed: 123,
+        config: {
+          engineTickMs: 100,
+          reactiveSensorIntervalMs: 100,
+          sensorStaleMs: 800,
+          idleToCuriousMs: 200,
+          boredAfterMs: 10_000,
+          sleepAfterMs: 20_000,
+        },
+      })
+      resources.push({ runtime, controller })
+      runtime.start()
+      await controller.connect()
+      await controller.arm()
+      await runtime.enable()
+
+      await vi.advanceTimersByTimeAsync(350)
+      expect(runtime.snapshot).toMatchObject({
+        status: 'running',
+        state: 'CURIOUS',
+      })
+      expect(controller.snapshot.phase).toBe('armed')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('performs every stationary dance stage before entering excited', async () => {
+    vi.useFakeTimers()
+    try {
+      const transport = new FakeTransport(EVO_3_PROFILE, createModernResponder())
+      const controller = new EvoController(transport)
+      const runtime = new BehaviorRuntime(controller, {
+        seed: 123,
+        config: {
+          reactiveSensorIntervalMs: 100,
+          sensorStaleMs: 1_000,
+        },
+      })
+      resources.push({ runtime, controller })
+      runtime.start()
+      await controller.connect()
+      await controller.arm()
+      await runtime.enable()
+      runtime.requestDance()
+
+      await vi.advanceTimersByTimeAsync(2_000)
+      const toneFrequencies = transport.writes
+        .filter((write) => readMessageId(write.data) === 118)
+        .map((write) => new DataView(
+          write.data.buffer,
+          write.data.byteOffset,
+          write.data.byteLength,
+        ).getUint16(6, true))
+      expect(toneFrequencies.slice(0, 3)).toEqual([392, 523, 659])
+      expect(runtime.snapshot).toMatchObject({
+        status: 'running',
+        state: 'EXCITED',
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('retains the stale-sensor fail-safe after focused-read retries are exhausted', async () => {
+    vi.useFakeTimers()
+    try {
+      let dropSafetyReads = false
+      const responder = createModernResponder()
+      const transport = new FakeTransport(EVO_3_PROFILE, async (write, fake) => {
+        if (dropSafetyReads && readMessageId(write.data) === 1) {
+          const view = new DataView(
+            write.data.buffer,
+            write.data.byteOffset,
+            write.data.byteLength,
+          )
+          if (view.getUint32(2, true) === 113 && view.getUint16(6, true) === 13) return
+        }
+        await responder(write, fake)
+      })
+      const controller = new EvoController(transport)
+      const runtime = new BehaviorRuntime(controller, {
+        seed: 123,
+        config: {
+          engineTickMs: 100,
+          reactiveSensorIntervalMs: 100,
+          sensorStaleMs: 600,
+        },
+      })
+      resources.push({ runtime, controller })
+      runtime.start()
+      await controller.connect()
+      await controller.arm()
+      await runtime.enable()
+      dropSafetyReads = true
+
+      await vi.advanceTimersByTimeAsync(1_500)
+      expect(runtime.snapshot).toMatchObject({
+        status: 'faulted',
+        state: 'IDLE',
+        error: 'Reactive sensor data became stale',
+      })
+      expect(controller.snapshot.phase).toBe('ready')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('starts in a stationary scared state when the baseline says Evo is picked up', async () => {
     const transport = new FakeTransport(EVO_3_PROFILE, createModernResponder({
       113: [1, 5, 0, 0, 0],

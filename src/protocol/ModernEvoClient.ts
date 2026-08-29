@@ -5,12 +5,15 @@ import {
 } from '../transport/EvoTransport.ts'
 import {
   assertCallSucceeded,
+  decodeAudioExecutionState,
   decodeMemReadResponse,
   encodeMemRead,
   encodePlayTone,
   encodeSetLed,
   encodeStopExecution,
   encodeVelocity,
+  EXECUTION_STATE,
+  executionStateName,
   MODERN_MESSAGE,
   readMessageId,
   readRequestId,
@@ -34,6 +37,7 @@ import {
   parseSurface,
   parseSurfaceColor,
   type EvoTelemetry,
+  type ReactiveSafetySensors,
   type ReactiveSensors,
 } from './telemetry.ts'
 
@@ -46,6 +50,7 @@ interface PendingRequest {
 const WHEEL_TRACK_METERS = 0.023
 const MAX_MEMORY_RESPONSE_DATA = 15
 const DEFAULT_MOVEMENT_TIMEOUT_MS = 2_000
+const REACTIVE_SENSOR_TIMEOUT_MS = 500
 
 function responseKey(messageId: number, requestId?: number): string {
   return `${messageId}:${requestId ?? 'single'}`
@@ -78,6 +83,20 @@ class RequestWriteTimeoutError extends Error {
   constructor(label: string) {
     super(`Timed out sending Evo ${label}`)
     this.name = 'RequestWriteTimeoutError'
+  }
+}
+
+class RequestCancelledError extends Error {
+  constructor() {
+    super('Protocol request was cancelled')
+    this.name = 'RequestCancelledError'
+  }
+}
+
+class AudioExecutionError extends Error {
+  constructor(requestId: number, state: string) {
+    super(`Evo audio execution ${state} for request ${requestId}`)
+    this.name = 'AudioExecutionError'
   }
 }
 
@@ -115,8 +134,11 @@ export class ModernEvoClient {
   private requestCounter = 0
   private pending = new Map<string, PendingRequest>()
   private unsubscribe: () => void
-  private memoryChain: Promise<void> = Promise.resolve()
-  private noIdChain: Promise<void> = Promise.resolve()
+  private rpcChain: Promise<void> = Promise.resolve()
+  private rpcGeneration = 0
+  private activeRpcController?: AbortController
+  private priorityBarrier: Promise<void> = Promise.resolve()
+  private readonly expectedLateResponses = new Set<string>()
   private soundRequestId?: number
   private readonly movementTimeoutMs: number
 
@@ -136,6 +158,7 @@ export class ModernEvoClient {
   }
 
   dispose(): void {
+    this.cancelOrdinaryRequests()
     this.unsubscribe()
     const error = new Error('Protocol client closed')
     for (const pending of this.pending.values()) {
@@ -143,9 +166,20 @@ export class ModernEvoClient {
       pending.reject(error)
     }
     this.pending.clear()
+    this.expectedLateResponses.clear()
   }
 
-  async setWheels(leftMmPerSecond: number, rightMmPerSecond: number, durationMs = 250): Promise<void> {
+  cancelOrdinaryRequests(): void {
+    this.rpcGeneration += 1
+    this.activeRpcController?.abort()
+  }
+
+  async setWheels(
+    leftMmPerSecond: number,
+    rightMmPerSecond: number,
+    durationMs = 250,
+    signal?: AbortSignal,
+  ): Promise<void> {
     if (![leftMmPerSecond, rightMmPerSecond].every(Number.isFinite)) {
       throw new TypeError('Wheel speeds must be finite numbers')
     }
@@ -156,16 +190,23 @@ export class ModernEvoClient {
     const requestId = this.nextRequestId()
     const packet = encodeVelocity(requestId, linear, angular, durationMs)
     try {
-      const response = await this.request(
-        packet,
-        MODERN_MESSAGE.velocityResponse,
-        requestId,
-        { replaceKey: 'movement' },
-        this.movementTimeoutMs,
-        'movement',
+      const response = await this.runRpcExclusive(
+        (rpcSignal) => this.request(
+          packet,
+          MODERN_MESSAGE.velocityResponse,
+          requestId,
+          { replaceKey: 'movement' },
+          this.movementTimeoutMs,
+          'movement',
+          rpcSignal,
+        ),
+        signal,
       )
       this.assertRequestResponse(response, MODERN_MESSAGE.velocityResponse, requestId)
     } catch (error) {
+      if (error instanceof RequestCancelledError) {
+        throw new MovementSupersededError(requestId)
+      }
       if (
         error instanceof TransportQueueCancelledError &&
         error.replaceKey === 'movement' &&
@@ -183,159 +224,222 @@ export class ModernEvoClient {
     }
   }
 
-  async stopMovement(): Promise<void> {
+  async stopMovement(cancelOrdinaryRequests = false): Promise<void> {
+    if (cancelOrdinaryRequests) this.cancelOrdinaryRequests()
     this.transport.clearQueued('movement')
     await this.stopExecution(0, true)
   }
 
   async setLed(mask: number, red: number, green: number, blue: number): Promise<void> {
-    await this.runNoIdExclusive(async () => {
+    await this.runRpcExclusive(async (signal) => {
+      this.throwIfAborted(signal)
       const response = await this.request(
         encodeSetLed(mask, red, green, blue),
         MODERN_MESSAGE.setLedResponse,
       )
+      this.throwIfAborted(signal)
       assertCallSucceeded(response, MODERN_MESSAGE.setLedResponse)
     })
   }
 
   async playTone(frequencyHz: number, durationMs: number): Promise<void> {
     const requestId = this.nextRequestId()
-    this.soundRequestId = requestId
-    const response = await this.request(
-      encodePlayTone(requestId, frequencyHz, durationMs),
-      MODERN_MESSAGE.playToneResponse,
-      requestId,
-    )
-    this.assertRequestResponse(response, MODERN_MESSAGE.playToneResponse, requestId)
+    try {
+      const response = await this.runRpcExclusive(async (signal) => {
+        this.soundRequestId = requestId
+        return this.request(
+          encodePlayTone(requestId, frequencyHz, durationMs),
+          MODERN_MESSAGE.playToneResponse,
+          requestId,
+          undefined,
+          2_500,
+          'tone',
+          signal,
+        )
+      })
+      this.assertRequestResponse(response, MODERN_MESSAGE.playToneResponse, requestId)
+    } catch (error) {
+      if (this.soundRequestId === requestId) this.soundRequestId = undefined
+      throw error
+    }
   }
 
-  async stopSound(): Promise<void> {
-    if (this.soundRequestId === undefined) return
+  async stopSound(): Promise<boolean> {
+    if (this.soundRequestId === undefined) return false
     const requestId = this.soundRequestId
     this.soundRequestId = undefined
     await this.stopExecution(requestId, true)
+    return true
   }
 
   async readFirmware(): Promise<{ version: string; rawMajor: number }> {
-    return parseFirmware(await this.readRegion(MEMORY_REGION.firmware))
+    return this.runRpcExclusive(async (signal) => {
+      return parseFirmware(await this.readRegion(MEMORY_REGION.firmware, signal))
+    })
   }
 
   async readTelemetry(): Promise<EvoTelemetry> {
-    const [
-      firmwareBytes,
-      batteryBytes,
-      proximityBytes,
-      colorSensorBytes,
-      processedColorBytes,
-      lineColorBytes,
-      surfaceColorBytes,
-      surfaceTypeBytes,
-      surfaceProximityBytes,
-      pickupBytes,
-      colorCodeBytes,
-      encoderBytes,
-      positionBytes,
-      chargerBytes,
-      buttonBytes,
-      lineSensorBytes,
-      irLeftRearBytes,
-      irLeftFrontBytes,
-      irRightRearBytes,
-      irRightFrontBytes,
-    ] = await Promise.all([
-      this.readRegion(MEMORY_REGION.firmware),
-      this.readRegion(MEMORY_REGION.battery),
-      this.readRegion(MEMORY_REGION.proximity),
-      this.readRegion(MEMORY_REGION.colorSensor),
-      this.readRegion(MEMORY_REGION.processedColor),
-      this.readRegion(MEMORY_REGION.lineColor),
-      this.readRegion(MEMORY_REGION.surfaceColor),
-      this.readRegion(MEMORY_REGION.surfaceType),
-      this.readRegion(MEMORY_REGION.surfaceProximity),
-      this.readRegion(MEMORY_REGION.pickup),
-      this.readRegion(MEMORY_REGION.colorCode),
-      this.readRegion(MEMORY_REGION.encoders),
-      this.readRegion(MEMORY_REGION.position),
-      this.readRegion(MEMORY_REGION.charger),
-      this.readRegion(MEMORY_REGION.button),
-      this.readRegion(MEMORY_REGION.lineSensors),
-      this.readRegion(MEMORY_REGION.irMessageLeftRear),
-      this.readRegion(MEMORY_REGION.irMessageLeftFront),
-      this.readRegion(MEMORY_REGION.irMessageRightRear),
-      this.readRegion(MEMORY_REGION.irMessageRightFront),
-    ])
-    const firmware = parseFirmware(firmwareBytes)
-    return {
-      firmware: firmware.version,
-      firmwareRawMajor: firmware.rawMajor,
-      battery: parseBattery(batteryBytes),
-      proximity: parseProximity(proximityBytes),
-      colorSensor: parseColorSensor(colorSensorBytes),
-      processedColor: parseProcessedColor(processedColorBytes),
-      line: parseLineColor(lineColorBytes),
-      surfaceColor: parseSurfaceColor(surfaceColorBytes),
-      surface: parseSurface(surfaceTypeBytes, surfaceProximityBytes, pickupBytes),
-      colorCode: parseColorCode(colorCodeBytes),
-      encoders: parseEncoders(encoderBytes),
-      position: parsePosition(positionBytes),
-      charger: parseCharger(chargerBytes),
-      button: parseButton(buttonBytes),
-      lineSensors: parseLineSensors(lineSensorBytes),
-      irMessages: {
-        leftRear: parseIrMessage(irLeftRearBytes),
-        leftFront: parseIrMessage(irLeftFrontBytes),
-        rightRear: parseIrMessage(irRightRearBytes),
-        rightFront: parseIrMessage(irRightFrontBytes),
-      },
-      receivedAt: Date.now(),
-    }
+    return this.runRpcExclusive(async (signal) => {
+      const firmwareBytes = await this.readRegion(MEMORY_REGION.firmware, signal)
+      const batteryBytes = await this.readRegion(MEMORY_REGION.battery, signal)
+      const proximityBytes = await this.readRegion(MEMORY_REGION.proximity, signal)
+      const colorSensorBytes = await this.readRegion(MEMORY_REGION.colorSensor, signal)
+      const processedColorBytes = await this.readRegion(MEMORY_REGION.processedColor, signal)
+      const lineColorBytes = await this.readRegion(MEMORY_REGION.lineColor, signal)
+      const surfaceColorBytes = await this.readRegion(MEMORY_REGION.surfaceColor, signal)
+      const surfaceTypeBytes = await this.readRegion(MEMORY_REGION.surfaceType, signal)
+      const surfaceProximityBytes = await this.readRegion(MEMORY_REGION.surfaceProximity, signal)
+      const pickupBytes = await this.readRegion(MEMORY_REGION.pickup, signal)
+      const colorCodeBytes = await this.readRegion(MEMORY_REGION.colorCode, signal)
+      const encoderBytes = await this.readRegion(MEMORY_REGION.encoders, signal)
+      const positionBytes = await this.readRegion(MEMORY_REGION.position, signal)
+      const chargerBytes = await this.readRegion(MEMORY_REGION.charger, signal)
+      const buttonBytes = await this.readRegion(MEMORY_REGION.button, signal)
+      const lineSensorBytes = await this.readRegion(MEMORY_REGION.lineSensors, signal)
+      const irLeftRearBytes = await this.readRegion(MEMORY_REGION.irMessageLeftRear, signal)
+      const irLeftFrontBytes = await this.readRegion(MEMORY_REGION.irMessageLeftFront, signal)
+      const irRightRearBytes = await this.readRegion(MEMORY_REGION.irMessageRightRear, signal)
+      const irRightFrontBytes = await this.readRegion(MEMORY_REGION.irMessageRightFront, signal)
+      const firmware = parseFirmware(firmwareBytes)
+      return {
+        firmware: firmware.version,
+        firmwareRawMajor: firmware.rawMajor,
+        battery: parseBattery(batteryBytes),
+        proximity: parseProximity(proximityBytes),
+        colorSensor: parseColorSensor(colorSensorBytes),
+        processedColor: parseProcessedColor(processedColorBytes),
+        line: parseLineColor(lineColorBytes),
+        surfaceColor: parseSurfaceColor(surfaceColorBytes),
+        surface: parseSurface(surfaceTypeBytes, surfaceProximityBytes, pickupBytes),
+        colorCode: parseColorCode(colorCodeBytes),
+        encoders: parseEncoders(encoderBytes),
+        position: parsePosition(positionBytes),
+        charger: parseCharger(chargerBytes),
+        button: parseButton(buttonBytes),
+        lineSensors: parseLineSensors(lineSensorBytes),
+        irMessages: {
+          leftRear: parseIrMessage(irLeftRearBytes),
+          leftFront: parseIrMessage(irLeftFrontBytes),
+          rightRear: parseIrMessage(irRightRearBytes),
+          rightFront: parseIrMessage(irRightFrontBytes),
+        },
+        receivedAt: Date.now(),
+      }
+    })
   }
 
   async readReactiveSensors(): Promise<ReactiveSensors> {
-    const [proximityBytes, pickupBytes, buttonBytes] = await Promise.all([
-      this.readRegion(MEMORY_REGION.proximity),
-      this.readRegion(MEMORY_REGION.pickup),
-      this.readRegion(MEMORY_REGION.button),
-    ])
-    return {
-      proximity: parseProximity(proximityBytes),
-      pickup: parsePickup(pickupBytes),
-      button: parseButton(buttonBytes),
-      receivedAt: Date.now(),
-    }
+    return this.runRpcExclusive(async (signal) => {
+      const safety = await this.readReactiveSafetyBlock(signal)
+      const buttonBytes = await this.readRegion(
+        MEMORY_REGION.button,
+        signal,
+        REACTIVE_SENSOR_TIMEOUT_MS,
+      )
+      return { ...safety, button: parseButton(buttonBytes) }
+    })
+  }
+
+  async readReactiveSafetySensors(
+    signal?: AbortSignal,
+    onRetry: () => void = () => undefined,
+  ): Promise<ReactiveSafetySensors> {
+    return this.runRpcExclusive(
+      (rpcSignal) => this.readReactiveSafetyBlock(rpcSignal, onRetry),
+      signal,
+    )
+  }
+
+  async readReactiveButton(signal?: AbortSignal): Promise<EvoTelemetry['button']> {
+    return this.runRpcExclusive(async (rpcSignal) => {
+      const bytes = await this.readRegion(
+        MEMORY_REGION.button,
+        rpcSignal,
+        REACTIVE_SENSOR_TIMEOUT_MS,
+      )
+      return parseButton(bytes)
+    }, signal)
   }
 
   private async stopExecution(requestId: number, priority: boolean): Promise<void> {
-    const response = await this.request(
+    const send = () => this.request(
       encodeStopExecution(requestId),
       MODERN_MESSAGE.stopExecutionResponse,
       requestId,
       { priority },
       1_000,
+      'stop',
     )
+    const responsePromise = this.priorityBarrier.then(send, send)
+    this.priorityBarrier = responsePromise.then(
+      () => undefined,
+      () => undefined,
+    )
+    const response = await responsePromise
     this.assertRequestResponse(response, MODERN_MESSAGE.stopExecutionResponse, requestId)
   }
 
-  private readRegion(region: { readonly address: number; readonly length: number }): Promise<Uint8Array> {
-    return this.runMemoryExclusive(async () => {
-      const result = new Uint8Array(region.length)
-      for (let offset = 0; offset < region.length; offset += MAX_MEMORY_RESPONSE_DATA) {
-        const length = Math.min(MAX_MEMORY_RESPONSE_DATA, region.length - offset)
-        const response = await this.request(
-          encodeMemRead(region.address + offset, length),
-          MODERN_MESSAGE.memReadResponse,
+  private async readReactiveSafetyBlock(
+    signal: AbortSignal,
+    onRetry: () => void = () => undefined,
+  ): Promise<ReactiveSafetySensors> {
+    let bytes: Uint8Array | undefined
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        bytes = await this.readRegion(
+          MEMORY_REGION.reactiveSafety,
+          signal,
+          REACTIVE_SENSOR_TIMEOUT_MS,
         )
-        const decoded = decodeMemReadResponse(response)
-        if (decoded.result !== 0) {
-          throw new Error(`Evo memory read failed with status ${decoded.result}`)
+        break
+      } catch (error) {
+        if (
+          attempt === 0 &&
+          (error instanceof RequestTimeoutError || error instanceof RequestWriteTimeoutError)
+        ) {
+          this.throwIfAborted(signal)
+          onRetry()
+          continue
         }
-        if (decoded.data.length !== length) {
-          throw new Error(`Evo returned ${decoded.data.length} bytes; expected ${length}`)
-        }
-        result.set(decoded.data, offset)
+        throw error
       }
-      return result
-    })
+    }
+    if (!bytes) throw new Error('Reactive safety sensor read did not complete')
+    return {
+      pickup: parsePickup(bytes.slice(0, MEMORY_REGION.pickup.length)),
+      proximity: parseProximity(bytes.slice(MEMORY_REGION.pickup.length)),
+      receivedAt: Date.now(),
+    }
+  }
+
+  private async readRegion(
+    region: { readonly address: number; readonly length: number },
+    signal: AbortSignal,
+    timeoutMs = 2_500,
+  ): Promise<Uint8Array> {
+    const result = new Uint8Array(region.length)
+    for (let offset = 0; offset < region.length; offset += MAX_MEMORY_RESPONSE_DATA) {
+      this.throwIfAborted(signal)
+      const length = Math.min(MAX_MEMORY_RESPONSE_DATA, region.length - offset)
+      const response = await this.request(
+        encodeMemRead(region.address + offset, length),
+        MODERN_MESSAGE.memReadResponse,
+        undefined,
+        undefined,
+        timeoutMs,
+        'memory read',
+      )
+      this.throwIfAborted(signal)
+      const decoded = decodeMemReadResponse(response)
+      if (decoded.result !== 0) {
+        throw new Error(`Evo memory read failed with status ${decoded.result}`)
+      }
+      if (decoded.data.length !== length) {
+        throw new Error(`Evo returned ${decoded.data.length} bytes; expected ${length}`)
+      }
+      result.set(decoded.data, offset)
+    }
+    return result
   }
 
   private request(
@@ -345,22 +449,47 @@ export class ModernEvoClient {
     writeOptions?: TransportWriteOptions,
     timeoutMs = 2_500,
     label = 'request',
+    signal?: AbortSignal,
   ): Promise<Uint8Array> {
     const key = responseKey(responseMessageId, requestId)
     if (this.pending.has(key)) {
       return Promise.reject(new Error(`A request for response ${key} is already pending`))
     }
+    if (signal?.aborted) return Promise.reject(new RequestCancelledError())
     const startedAt = Date.now()
     return new Promise<Uint8Array>((resolve, reject) => {
+      let pending!: PendingRequest
+      const abort = (): void => {
+        if (this.pending.get(key) !== pending) return
+        this.pending.delete(key)
+        pending.reject(new RequestCancelledError())
+      }
+      const cleanup = (): void => {
+        clearTimeout(pending.timer)
+        signal?.removeEventListener('abort', abort)
+      }
       const timer = setTimeout(() => {
+        if (this.pending.get(key) !== pending) return
         this.pending.delete(key)
         this.diagnostic(
           `${label} timeout waiting to send after ${Date.now() - startedAt} ms` +
-            (requestId ? ` (request ${requestId})` : ''),
+            (requestId !== undefined ? ` (request ${requestId})` : ''),
         )
-        reject(new RequestWriteTimeoutError(label))
+        pending.reject(new RequestWriteTimeoutError(label))
       }, timeoutMs)
-      this.pending.set(key, { resolve, reject, timer })
+      pending = {
+        timer,
+        resolve: (response) => {
+          cleanup()
+          resolve(response)
+        },
+        reject: (error) => {
+          cleanup()
+          reject(error)
+        },
+      }
+      this.pending.set(key, pending)
+      signal?.addEventListener('abort', abort, { once: true })
       void this.transport
         .write(packet, 'control', writeOptions)
         .then(() => {
@@ -371,7 +500,7 @@ export class ModernEvoClient {
             this.pending.delete(key)
             this.diagnostic(
               `${label} timeout waiting for response ${responseMessageId} after ${timeoutMs} ms` +
-                (requestId ? ` (request ${requestId})` : ''),
+                (requestId !== undefined ? ` (request ${requestId})` : ''),
             )
             pending.reject(new RequestTimeoutError({ responseMessageId, requestId }))
           }, timeoutMs)
@@ -390,6 +519,10 @@ export class ModernEvoClient {
     try {
       if (packet.length > 512) throw new RangeError('Notification is too large')
       const messageId = readMessageId(packet)
+      if (messageId === MODERN_MESSAGE.audioExecutionState) {
+        this.handleAudioExecution(packet)
+        return
+      }
       const hasRequestId = [
         MODERN_MESSAGE.velocityResponse,
         MODERN_MESSAGE.playToneResponse,
@@ -399,6 +532,7 @@ export class ModernEvoClient {
       const key = responseKey(messageId, requestId)
       const pending = this.pending.get(key)
       if (!pending) {
+        if (this.expectedLateResponses.delete(key)) return
         this.diagnostic(`Ignored unsolicited protocol message ${messageId}`)
         return
       }
@@ -407,6 +541,36 @@ export class ModernEvoClient {
       pending.resolve(packet.slice())
     } catch (error) {
       this.diagnostic(`Rejected malformed notification: ${asError(error).message}`)
+    }
+  }
+
+  private handleAudioExecution(packet: Uint8Array): void {
+    const event = decodeAudioExecutionState(packet)
+    const key = responseKey(MODERN_MESSAGE.playToneResponse, event.requestId)
+    const pending = this.pending.get(key)
+    if (event.executionState === EXECUTION_STATE.finishedNormal) {
+      if (pending) {
+        const response = new Uint8Array(6)
+        const view = new DataView(response.buffer)
+        view.setUint16(0, MODERN_MESSAGE.playToneResponse, true)
+        view.setUint32(2, event.requestId, true)
+        this.pending.delete(key)
+        this.rememberExpectedLateResponse(key)
+        pending.resolve(response)
+      }
+      if (this.soundRequestId === event.requestId) this.soundRequestId = undefined
+      return
+    }
+    if (event.executionState === EXECUTION_STATE.running) return
+
+    if (this.soundRequestId === event.requestId) this.soundRequestId = undefined
+    const state = executionStateName(event.executionState)
+    if (pending) {
+      this.pending.delete(key)
+      pending.reject(new AudioExecutionError(event.requestId, state))
+    }
+    if (event.executionState !== EXECUTION_STATE.finishedForced) {
+      this.diagnostic(`Audio execution ${state} for request ${event.requestId}`)
     }
   }
 
@@ -426,21 +590,49 @@ export class ModernEvoClient {
     return (0x02_00_00_00 | this.requestCounter) >>> 0
   }
 
-  private runMemoryExclusive<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.memoryChain.then(operation, operation)
-    this.memoryChain = result.then(
+  private rememberExpectedLateResponse(key: string): void {
+    this.expectedLateResponses.add(key)
+    if (this.expectedLateResponses.size <= 100) return
+    const oldest = this.expectedLateResponses.values().next().value
+    if (oldest !== undefined) this.expectedLateResponses.delete(oldest)
+  }
+
+  private runRpcExclusive<T>(
+    operation: (signal: AbortSignal) => Promise<T>,
+    externalSignal?: AbortSignal,
+  ): Promise<T> {
+    const generation = this.rpcGeneration
+    const controller = new AbortController()
+    const abort = (): void => controller.abort()
+    if (externalSignal?.aborted) {
+      controller.abort()
+    } else {
+      externalSignal?.addEventListener('abort', abort, { once: true })
+    }
+    const run = async (): Promise<T> => {
+      try {
+        await this.priorityBarrier
+        if (generation !== this.rpcGeneration || controller.signal.aborted) {
+          throw new RequestCancelledError()
+        }
+        this.activeRpcController = controller
+        const result = await operation(controller.signal)
+        this.throwIfAborted(controller.signal)
+        return result
+      } finally {
+        if (this.activeRpcController === controller) this.activeRpcController = undefined
+        externalSignal?.removeEventListener('abort', abort)
+      }
+    }
+    const result = this.rpcChain.then(run, run)
+    this.rpcChain = result.then(
       () => undefined,
       () => undefined,
     )
     return result
   }
 
-  private runNoIdExclusive<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.noIdChain.then(operation, operation)
-    this.noIdChain = result.then(
-      () => undefined,
-      () => undefined,
-    )
-    return result
+  private throwIfAborted(signal: AbortSignal): void {
+    if (signal.aborted) throw new RequestCancelledError()
   }
 }

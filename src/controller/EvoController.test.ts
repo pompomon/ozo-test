@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { EVO_3_PROFILE, LEGACY_PROFILE } from '../protocol/profile.ts'
 import { readMessageId } from '../protocol/modernCodec.ts'
+import type { ReactiveSensors } from '../protocol/telemetry.ts'
 import { FakeTransport, createModernResponder } from '../test/FakeTransport.ts'
 import { EvoController } from './EvoController.ts'
 
@@ -44,11 +45,90 @@ describe('EvoController', () => {
         return { address: view.getUint32(2, true), length: view.getUint16(6, true) }
       })
     expect(reads).toEqual([
-      { address: 118, length: 8 },
-      { address: 113, length: 5 },
-      { address: 196, length: 5 },
+      { address: 113, length: 13 },
     ])
     await controller.disconnect()
+  })
+
+  it('retries a transient focused safety-read timeout', async () => {
+    vi.useFakeTimers()
+    try {
+      let safetyReads = 0
+      const responder = createModernResponder()
+      const transport = new FakeTransport(EVO_3_PROFILE, async (write, fake) => {
+        if (readMessageId(write.data) === 1) {
+          const view = new DataView(
+            write.data.buffer,
+            write.data.byteOffset,
+            write.data.byteLength,
+          )
+          if (view.getUint32(2, true) === 113 && view.getUint16(6, true) === 13) {
+            safetyReads += 1
+            if (safetyReads === 1) return
+          }
+        }
+        await responder(write, fake)
+      })
+      const controller = new EvoController(transport)
+      await controller.connect()
+      await controller.arm()
+      const samples: ReactiveSensors[] = []
+      const errors = vi.fn()
+      const polling = controller.startReactiveSensorPolling(
+        (sensors) => samples.push(sensors),
+        errors,
+        1_000,
+      )
+
+      await vi.advanceTimersByTimeAsync(501)
+      const stop = await polling
+      expect(safetyReads).toBe(2)
+      expect(samples).toHaveLength(1)
+      expect(errors).not.toHaveBeenCalled()
+      stop()
+      await controller.disconnect()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps safety samples fresh when the lower-rate button read fails', async () => {
+    vi.useFakeTimers()
+    try {
+      let pollingStarted = false
+      const responder = createModernResponder()
+      const transport = new FakeTransport(EVO_3_PROFILE, async (write, fake) => {
+        if (pollingStarted && readMessageId(write.data) === 1) {
+          const view = new DataView(
+            write.data.buffer,
+            write.data.byteOffset,
+            write.data.byteLength,
+          )
+          if (view.getUint32(2, true) === 196) return
+        }
+        await responder(write, fake)
+      })
+      const controller = new EvoController(transport)
+      await controller.connect()
+      await controller.arm()
+      pollingStarted = true
+      const samples: ReactiveSensors[] = []
+      const errors = vi.fn()
+      const stop = await controller.startReactiveSensorPolling(
+        (sensors) => samples.push(sensors),
+        errors,
+        250,
+      )
+
+      await vi.advanceTimersByTimeAsync(1_751)
+      expect(samples.length).toBeGreaterThan(3)
+      expect(errors).not.toHaveBeenCalled()
+      expect(controller.exportDiagnostics()).toContain('Reactive button read failed')
+      stop()
+      await controller.disconnect()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('requires arming and prioritizes a stop after movement', async () => {

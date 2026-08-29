@@ -49,8 +49,15 @@ Implemented short RPCs:
 | Set LED | `110` / `111` | `u16 id, u16 mask, u8 red, green, blue, alpha` |
 | Play tone | `118` / `119` | `u16 id, u32 request, u16 frequency, u16 duration, u8 volume` |
 | Stop execution | `120` / `121` | `u16 id, u32 request`; request `0` stops all execution |
+| Audio execution event | `259` | `u16 id, u32 request, u8 execution state` |
 
 Ordinary short packets have no application-level checksum. BLE supplies link-layer integrity. The protocol defines CRC-32 only for long RPC transfers, which this app does not currently use.
+
+The official client serializes short request/response transactions. This app does the same while
+continuing to receive asynchronous events. Audio event `259` uses state `0` for running, `1` for
+normal completion, and `2`–`7` for forced or failed completion. A normal event correlated by request
+ID can confirm a tone completed if response `119` was lost; other terminal states fail the action.
+Priority stop requests bypass the ordinary transaction queue.
 
 ### Virtual memory read by the app
 
@@ -79,14 +86,17 @@ sample to the safety-relevant regions:
 
 | Signal | Address | Bytes |
 | --- | ---: | ---: |
-| Pickup state | 113 | 5 |
-| Four-direction IR proximity | 118 | 8 |
+| Pickup state + four-direction IR proximity | 113 | 13 |
 | Button state | 196 | 5 |
 
 `EvoController.startReactiveSensorPolling()` stops the ordinary full-telemetry interval, establishes
-a baseline, and then performs one non-overlapping focused sample at a configurable cadence. Ending
-personality mode restores full telemetry polling. Memory operations remain serialized by
-`ModernEvoClient`; behavior code does not access the protocol or transport layers directly.
+a baseline, and then performs one non-overlapping focused safety sample at a configurable cadence.
+The contiguous pickup/proximity block has a 500 ms request deadline and one immediate retry. Movement
+refreshes stop before that retry. Button reads run separately once per second, so a missing button
+response cannot make an otherwise current safety sample stale. Ending personality mode cancels
+queued polling work and restores full telemetry polling. All short RPC request/response pairs remain
+serialized by `ModernEvoClient`; behavior code does not access the protocol or transport layers
+directly.
 
 The proximity fields are exposed as raw bytes. Their polarity, useful thresholds, and relationship
 to physical distance remain hardware-validation items. The behavior configuration therefore keeps

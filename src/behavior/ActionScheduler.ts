@@ -64,7 +64,7 @@ export class ActionScheduler {
   async cancel(): Promise<void> {
     const active = this.active
     if (!active) {
-      await this.port.cleanup()
+      await this.port.cleanup(true)
       return
     }
     active.controller.abort()
@@ -100,8 +100,10 @@ export class ActionScheduler {
       }
     }
 
+    const forceCleanup = signal.aborted || failure !== undefined
     try {
-      await this.port.cleanup()
+      await this.port.cleanup(forceCleanup)
+      if (!forceCleanup && signal.aborted) await this.port.cleanup(true)
     } catch (error) {
       failure ??= error
     } finally {

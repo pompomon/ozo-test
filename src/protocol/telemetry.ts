@@ -81,6 +81,12 @@ export interface ReactiveSensors {
   readonly receivedAt: number
 }
 
+export interface ReactiveSafetySensors {
+  readonly proximity: EvoTelemetry['proximity']
+  readonly pickup: PickupState
+  readonly receivedAt: number
+}
+
 export const MEMORY_REGION = {
   firmware: { address: 65_580, length: 4 },
   lineSensors: { address: 0, length: 28 },
@@ -93,6 +99,7 @@ export const MEMORY_REGION = {
   surfaceType: { address: 108, length: 5 },
   pickup: { address: 113, length: 5 },
   proximity: { address: 118, length: 8 },
+  reactiveSafety: { address: 113, length: 13 },
   irMessageLeftRear: { address: 126, length: 6 },
   irMessageLeftFront: { address: 132, length: 6 },
   irMessageRightRear: { address: 138, length: 6 },

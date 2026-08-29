@@ -65,6 +65,32 @@ describe('BehaviorEngine', () => {
     })?.transition).toMatchObject({ from: 'SCARED', to: 'ANGRY' })
   })
 
+  it('preserves stationary dance timing and enables bounded movement only when configured', () => {
+    const clock = testClock()
+    const stationary = new BehaviorEngine(
+      createBehaviorConfig(),
+      clock,
+      new SeededRandom(7),
+    )
+    stationary.start()
+    const stationaryDance = stationary.handleEvent({ type: 'DANCE_REQUESTED', at: 1 })
+    expect(stationaryDance?.actions.filter((action) => action.type === 'DRIVE')).toEqual([])
+    expect(stationaryDance?.actions
+      .filter((action) => action.type === 'WAIT')
+      .map((action) => action.durationMs)).toEqual([380, 380, 350, 250])
+
+    const moving = new BehaviorEngine(
+      createBehaviorConfig({ movementEnabled: true }),
+      clock,
+      new SeededRandom(7),
+    )
+    moving.start()
+    const movingDance = moving.handleEvent({ type: 'DANCE_REQUESTED', at: 1 })
+    expect(movingDance?.actions
+      .filter((action) => action.type === 'DRIVE')
+      .map((action) => action.durationMs)).toEqual([380, 380, 350])
+  })
+
   it('enters bored and sleeping states based only on external inactivity', () => {
     const clock = testClock()
     const config = createBehaviorConfig({

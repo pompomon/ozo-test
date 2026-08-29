@@ -59,7 +59,7 @@ export function BehaviorPanel({
       {!snapshot.movementEnabled && (
         <p className="control-help">
           Autonomous movement is locked until proximity direction and thresholds are validated on
-          physical hardware. Lights, tones, sensors, and personality states remain active.
+          physical hardware. Dance remains available as stationary lights and tones.
         </p>
       )}
       <div className="button-row behavior-actions">

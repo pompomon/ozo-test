@@ -158,5 +158,5 @@ export interface BehaviorRuntimeSnapshot {
 
 export interface RobotActionPort {
   execute(action: RobotAction, signal: AbortSignal): Promise<void>
-  cleanup(): Promise<void>
+  cleanup(force: boolean): Promise<void>
 }

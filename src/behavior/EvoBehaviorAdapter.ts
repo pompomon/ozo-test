@@ -30,6 +30,8 @@ export function abortableDelay(durationMs: number, signal: AbortSignal): Promise
 
 export class EvoBehaviorAdapter implements RobotActionPort {
   private readonly controller: BehaviorController
+  private motionActive = false
+  private soundActive = false
 
   constructor(controller: BehaviorController) {
     this.controller = controller
@@ -39,43 +41,57 @@ export class EvoBehaviorAdapter implements RobotActionPort {
     if (signal.aborted) throw abortError()
     switch (action.type) {
       case 'DRIVE':
+        this.motionActive = true
         this.controller.setDrive(action.left, action.right)
         try {
           await abortableDelay(action.durationMs, signal)
         } finally {
           await this.controller.stopMotion()
+          this.motionActive = false
         }
         return
       case 'LIGHTS':
         await this.controller.setLights(action.mask, action.color, action.brightness)
         return
       case 'TONE':
+        this.soundActive = true
         await this.controller.playTone(action.frequencyHz, action.durationMs)
         await abortableDelay(action.durationMs, signal)
+        this.soundActive = false
         return
       case 'WAIT':
         await abortableDelay(action.durationMs, signal)
         return
       case 'STOP_MOTION':
+        if (!this.motionActive) return
         await this.controller.stopMotion()
+        this.motionActive = false
         return
       case 'STOP_SOUND':
+        if (!this.soundActive) return
         await this.controller.stopSound()
+        this.soundActive = false
         return
     }
   }
 
-  async cleanup(): Promise<void> {
+  async cleanup(force: boolean): Promise<void> {
     let failure: unknown
-    try {
-      await this.controller.stopMotion()
-    } catch (error) {
-      failure = error
+    if (force || this.motionActive) {
+      try {
+        await this.controller.stopMotion()
+        this.motionActive = false
+      } catch (error) {
+        failure = error
+      }
     }
-    try {
-      await this.controller.stopSound()
-    } catch (error) {
-      failure ??= error
+    if (force || this.soundActive) {
+      try {
+        await this.controller.stopSound()
+        this.soundActive = false
+      } catch (error) {
+        failure ??= error
+      }
     }
     if (failure !== undefined) throw failure
   }

@@ -28,7 +28,9 @@ export function movement(
   right: number,
   durationMs: number,
 ): readonly RobotAction[] {
-  return config.movementEnabled ? [{ type: 'DRIVE', left, right, durationMs }] : []
+  return config.movementEnabled
+    ? [{ type: 'DRIVE', left, right, durationMs }]
+    : [{ type: 'WAIT', durationMs }]
 }
 
 export function transition(
