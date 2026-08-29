@@ -86,6 +86,15 @@ export interface MutableModernResponder {
   setMemory(address: number, data: readonly number[]): void
 }
 
+function audioExecutionState(requestId: number, executionState: number): Uint8Array {
+  const response = new Uint8Array(7)
+  const view = new DataView(response.buffer)
+  view.setUint16(0, 259, true)
+  view.setUint32(2, requestId, true)
+  response[6] = executionState
+  return response
+}
+
 export function createMutableModernResponder(
   memoryOverrides: Readonly<Record<number, readonly number[]>> = {},
 ): MutableModernResponder {
@@ -112,8 +121,16 @@ export function createMutableModernResponder(
       const responseIds: Readonly<Record<number, number>> = { 104: 105, 118: 119, 120: 121 }
       response = new Uint8Array(6)
       const responseView = new DataView(response.buffer)
+      const requestId = view.getUint32(2, true)
       responseView.setUint16(0, responseIds[messageId], true)
-      responseView.setUint32(2, view.getUint32(2, true), true)
+      responseView.setUint32(2, requestId, true)
+      if (messageId === 118) {
+        const durationMs = view.getUint16(8, true)
+        queueMicrotask(() => transport.emit(response!))
+        queueMicrotask(() => transport.emit(audioExecutionState(requestId, 0)))
+        setTimeout(() => transport.emit(audioExecutionState(requestId, 1)), durationMs)
+        return
+      }
     } else if (messageId === 110) {
       response = Uint8Array.of(111, 0, 0)
     }

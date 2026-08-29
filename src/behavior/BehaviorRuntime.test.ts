@@ -274,7 +274,7 @@ describe('BehaviorRuntime', () => {
         config: {
           engineTickMs: 100,
           reactiveSensorIntervalMs: 100,
-          sensorStaleMs: 600,
+          sensorStaleMs: 700,
         },
       })
       resources.push({ runtime, controller })

@@ -4,7 +4,7 @@ export interface BehaviorController {
   setDrive(left: number, right: number): void
   stopMotion(): Promise<void>
   setLights(mask: number, color: string, brightness: number): Promise<void>
-  playTone(frequencyHz: number, durationMs: number): Promise<void>
+  playTone(frequencyHz: number, durationMs: number, signal?: AbortSignal): Promise<void>
   stopSound(): Promise<void>
 }
 
@@ -55,8 +55,7 @@ export class EvoBehaviorAdapter implements RobotActionPort {
         return
       case 'TONE':
         this.soundActive = true
-        await this.controller.playTone(action.frequencyHz, action.durationMs)
-        await abortableDelay(action.durationMs, signal)
+        await this.controller.playTone(action.frequencyHz, action.durationMs, signal)
         this.soundActive = false
         return
       case 'WAIT':

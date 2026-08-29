@@ -1,5 +1,8 @@
 import type { Clock, RandomSource } from './types.ts'
-import { MIN_REACTIVE_SENSOR_INTERVAL_MS } from '../controller/constants.ts'
+import {
+  MIN_REACTIVE_SENSOR_INTERVAL_MS,
+  REACTIVE_BUTTON_BLOCKING_BUDGET_MS,
+} from '../controller/constants.ts'
 
 export interface BehaviorConfig {
   readonly engineTickMs: number
@@ -116,9 +119,12 @@ export function createBehaviorConfig(overrides: Partial<BehaviorConfig> = {}): B
   }
   if (
     config.sensorStaleMs <=
-    Math.max(MIN_REACTIVE_SENSOR_INTERVAL_MS, Math.round(config.reactiveSensorIntervalMs))
+    Math.max(MIN_REACTIVE_SENSOR_INTERVAL_MS, Math.round(config.reactiveSensorIntervalMs)) +
+      REACTIVE_BUTTON_BLOCKING_BUDGET_MS
   ) {
-    throw new RangeError('sensorStaleMs must be greater than reactiveSensorIntervalMs')
+    throw new RangeError(
+      'sensorStaleMs must exceed the reactive sensor interval and button-read timeout budget',
+    )
   }
   if (config.ambientMaxWaitMs < config.ambientMinWaitMs) {
     throw new RangeError('ambientMaxWaitMs must be at least ambientMinWaitMs')

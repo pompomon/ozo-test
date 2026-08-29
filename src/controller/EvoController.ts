@@ -88,6 +88,7 @@ export class EvoController {
   private reactiveSensorTimer?: ReturnType<typeof setTimeout>
   private reactiveButtonTimer?: ReturnType<typeof setTimeout>
   private reactiveSensorAbort?: AbortController
+  private reactiveSafetyHealthy = true
   private reactiveSensorGeneration = 0
   private telemetryInFlight = false
   private sensorReadChain: Promise<void> = Promise.resolve()
@@ -315,6 +316,7 @@ export class EvoController {
 
   setDrive(left: number, right: number): void {
     if (this.snapshotValue.phase !== 'armed') return
+    if (this.reactiveSensorAbort && !this.reactiveSafetyHealthy) return
     const wheels = normalizeWheelSpeeds(left, right)
     this.targetWheels = wheels
     this.patch({ wheels })
@@ -404,9 +406,13 @@ export class EvoController {
     this.log('info', `Updated LEDs (mask 0x${mask.toString(16)})`)
   }
 
-  async playTone(frequencyHz: number, durationMs: number): Promise<void> {
+  async playTone(
+    frequencyHz: number,
+    durationMs: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
     if (!this.canUse('sound') || !this.client) return
-    await this.client.playTone(frequencyHz, durationMs)
+    await this.client.playTone(frequencyHz, durationMs, signal)
     this.log('info', `Played ${frequencyHz} Hz tone`)
   }
 
@@ -489,6 +495,7 @@ export class EvoController {
     const generation = this.reactiveSensorGeneration
     const pollingController = new AbortController()
     this.reactiveSensorAbort = pollingController
+    this.reactiveSafetyHealthy = false
     let latestButton = this.snapshotValue.telemetry?.button ?? {
       press: 'Release',
       timestamp: 0,
@@ -511,6 +518,7 @@ export class EvoController {
           this.snapshotValue.phase === 'armed' &&
           this.transport.connected
         ) {
+          this.reactiveSafetyHealthy = true
           handler(asReactiveSensors(sensors))
         }
       } catch (error) {
@@ -519,6 +527,7 @@ export class EvoController {
           this.transport.connected &&
           !pollingController.signal.aborted
         ) {
+          this.pauseMotionForSensorRetry()
           onError(error instanceof Error ? error : new Error(errorMessage(error)))
         }
       } finally {
@@ -578,6 +587,7 @@ export class EvoController {
       ) {
         throw new Error('Reactive sensor polling was interrupted')
       }
+      this.reactiveSafetyHealthy = true
       handler(asReactiveSensors(sensors))
     } catch (error) {
       const interrupted =
@@ -689,6 +699,7 @@ export class EvoController {
 
   private pauseMotionForSensorRetry(): void {
     const wasMoving = this.targetWheels.left !== 0 || this.targetWheels.right !== 0
+    this.reactiveSafetyHealthy = false
     this.targetWheels = { left: 0, right: 0 }
     this.driveGeneration += 1
     this.driveAbort?.abort()
@@ -722,6 +733,7 @@ export class EvoController {
     this.reactiveSensorGeneration += 1
     this.reactiveSensorAbort?.abort()
     this.reactiveSensorAbort = undefined
+    this.reactiveSafetyHealthy = true
     if (this.reactiveSensorTimer) clearTimeout(this.reactiveSensorTimer)
     this.reactiveSensorTimer = undefined
     if (this.reactiveButtonTimer) clearTimeout(this.reactiveButtonTimer)

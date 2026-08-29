@@ -50,7 +50,48 @@ describe('EvoController', () => {
     await controller.disconnect()
   })
 
-  it('retries a transient focused safety-read timeout', async () => {
+  it('cancels an in-flight telemetry refresh before focused polling starts', async () => {
+    let dropNextMemoryRead = false
+    const responder = createModernResponder()
+    const transport = new FakeTransport(EVO_3_PROFILE, async (write, fake) => {
+      if (dropNextMemoryRead && readMessageId(write.data) === 1) {
+        dropNextMemoryRead = false
+        return
+      }
+      await responder(write, fake)
+    })
+    const controller = new EvoController(transport)
+    await controller.connect()
+    await controller.arm()
+    transport.writes.splice(0)
+    dropNextMemoryRead = true
+
+    const telemetry = controller.refreshTelemetry()
+    await vi.waitFor(() => expect(transport.writes).toHaveLength(1))
+    const polling = controller.startReactiveSensorPolling(
+      () => undefined,
+      () => undefined,
+      1_000,
+    )
+    const stop = await polling
+    await telemetry
+
+    const reads = transport.writes
+      .filter((write) => readMessageId(write.data) === 1)
+      .map((write) => {
+        const view = new DataView(write.data.buffer, write.data.byteOffset, write.data.byteLength)
+        return { address: view.getUint32(2, true), length: view.getUint16(6, true) }
+      })
+    expect(reads).toEqual([
+      { address: 65_580, length: 4 },
+      { address: 0, length: 1 },
+      { address: 113, length: 13 },
+    ])
+    stop()
+    await controller.disconnect()
+  })
+
+  it('accepts one delayed focused safety response without overlapping a retry', async () => {
     vi.useFakeTimers()
     try {
       let safetyReads = 0
@@ -64,7 +105,12 @@ describe('EvoController', () => {
           )
           if (view.getUint32(2, true) === 113 && view.getUint16(6, true) === 13) {
             safetyReads += 1
-            if (safetyReads === 1) return
+            if (safetyReads === 1) {
+              setTimeout(() => {
+                void responder(write, fake)
+              }, 750)
+              return
+            }
           }
         }
         await responder(write, fake)
@@ -80,11 +126,66 @@ describe('EvoController', () => {
         1_000,
       )
 
-      await vi.advanceTimersByTimeAsync(501)
+      await vi.advanceTimersByTimeAsync(751)
       const stop = await polling
-      expect(safetyReads).toBe(2)
+      expect(safetyReads).toBe(1)
       expect(samples).toHaveLength(1)
       expect(errors).not.toHaveBeenCalled()
+      stop()
+      await controller.disconnect()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('pauses movement before retrying a focused safety read', async () => {
+    vi.useFakeTimers()
+    try {
+      let dropNextSafetyRead = false
+      const responder = createModernResponder()
+      const transport = new FakeTransport(EVO_3_PROFILE, async (write, fake) => {
+        if (dropNextSafetyRead && readMessageId(write.data) === 1) {
+          const view = new DataView(
+            write.data.buffer,
+            write.data.byteOffset,
+            write.data.byteLength,
+          )
+          if (view.getUint32(2, true) === 113 && view.getUint16(6, true) === 13) {
+            dropNextSafetyRead = false
+            return
+          }
+        }
+        await responder(write, fake)
+      })
+      const controller = new EvoController(transport)
+      await controller.connect()
+      await controller.arm()
+      const errors = vi.fn()
+      const stop = await controller.startReactiveSensorPolling(
+        () => undefined,
+        errors,
+        250,
+      )
+      dropNextSafetyRead = true
+      controller.setDrive(1, 1)
+
+      await vi.advanceTimersByTimeAsync(751)
+      expect(controller.snapshot.wheels).toEqual({ left: 0, right: 0 })
+      expect(controller.snapshot.phase).toBe('armed')
+      expect(errors).not.toHaveBeenCalled()
+      expect(controller.exportDiagnostics()).toContain('movement paused for retry')
+
+      const movementWrites = (): number => transport.writes
+        .filter((write) => readMessageId(write.data) === 104)
+        .length
+      const beforeBlockedDrive = movementWrites()
+      controller.setDrive(1, 1)
+      await Promise.resolve()
+      expect(movementWrites()).toBe(beforeBlockedDrive)
+
+      await vi.advanceTimersByTimeAsync(501)
+      controller.setDrive(1, 1)
+      await vi.waitFor(() => expect(movementWrites()).toBeGreaterThan(beforeBlockedDrive))
       stop()
       await controller.disconnect()
     } finally {
@@ -245,6 +346,18 @@ describe('EvoController', () => {
     expect([...transport.writes[0].data]).toEqual([0x50, 0x02, 0x01])
     await controller.arm()
     expect(controller.snapshot.phase).toBe('incompatible')
+    await controller.disconnect()
+  })
+
+  it('does not log a sound stop when no command was sent', async () => {
+    const controller = new EvoController(
+      new FakeTransport(EVO_3_PROFILE, createModernResponder()),
+    )
+    await controller.connect()
+    controller.clearDiagnostics()
+
+    await controller.stopSound()
+    expect(controller.exportDiagnostics()).not.toContain('Stopped sound')
     await controller.disconnect()
   })
 

@@ -56,8 +56,9 @@ Ordinary short packets have no application-level checksum. BLE supplies link-lay
 The official client serializes short request/response transactions. This app does the same while
 continuing to receive asynchronous events. Audio event `259` uses state `0` for running, `1` for
 normal completion, and `2`–`7` for forced or failed completion. A normal event correlated by request
-ID can confirm a tone completed if response `119` was lost; other terminal states fail the action.
-Priority stop requests bypass the ordinary transaction queue.
+ID is required to complete a tone and can also replace a lost response `119`. Other terminal states
+are diagnosed and fail an in-flight tone request. Tone deadlines include the requested playback
+duration. Priority stop requests bypass the ordinary transaction queue and cancel queued audio work.
 
 ### Virtual memory read by the app
 
@@ -91,10 +92,14 @@ sample to the safety-relevant regions:
 
 `EvoController.startReactiveSensorPolling()` stops the ordinary full-telemetry interval, establishes
 a baseline, and then performs one non-overlapping focused safety sample at a configurable cadence.
-The contiguous pickup/proximity block has a 500 ms request deadline and one immediate retry. Movement
-refreshes stop before that retry. Button reads run separately once per second, so a missing button
-response cannot make an otherwise current safety sample stale. Ending personality mode cancels
-queued polling work and restores full telemetry polling. All short RPC request/response pairs remain
+The contiguous pickup/proximity block pauses movement at a 500 ms soft deadline, has a 900 ms response
+deadline, and permits one retry. Because memory response `2` has no request ID, a timed-out or
+cancelled read is followed by a short, distinct-length synchronization read before retrying; this
+drains any delayed response instead of allowing it to satisfy newer work. Button reads have a 250 ms
+deadline and run separately once per second, so a missing button response cannot make an otherwise
+current safety sample stale. Ending personality mode cancels queued polling work and restores full
+telemetry polling. Full telemetry remains sequential but releases the short-RPC queue between reads,
+allowing movement and focused safety work to proceed. All short RPC request/response pairs remain
 serialized by `ModernEvoClient`; behavior code does not access the protocol or transport layers
 directly.
 
