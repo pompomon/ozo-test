@@ -142,6 +142,42 @@ describe('Evo Control UI', () => {
     }
   })
 
+  it('triggers keyboard emergency stop while arming', async () => {
+    const controller = new EvoController(
+      new FakeTransport(EVO_3_PROFILE, createModernResponder()),
+    )
+    const runtime = new BehaviorRuntime(controller)
+    const previousWakeLock = navigator.wakeLock
+    Object.defineProperty(navigator, 'wakeLock', {
+      configurable: true,
+      value: { request: vi.fn(() => new Promise(() => undefined)) },
+    })
+    controllers.push(controller)
+    await controller.connect()
+
+    try {
+      const emergencyStop = vi.spyOn(runtime, 'emergencyStop')
+      render(<App controller={controller} behaviorRuntime={runtime} />)
+      fireEvent.click(screen.getByRole('button', { name: 'Arm motors' }))
+
+      expect(await screen.findByText('Arming motors')).toBeInTheDocument()
+      fireEvent.keyDown(window, { key: ' ' })
+
+      await waitFor(() => {
+        expect(emergencyStop).toHaveBeenCalledWith('Emergency stop pressed with Space')
+      })
+    } finally {
+      if (previousWakeLock === undefined) {
+        Reflect.deleteProperty(navigator, 'wakeLock')
+      } else {
+        Object.defineProperty(navigator, 'wakeLock', {
+          configurable: true,
+          value: previousWakeLock,
+        })
+      }
+    }
+  })
+
   it('reports keyboard emergency-stop failures', async () => {
     const controller = new EvoController(
       new FakeTransport(EVO_3_PROFILE, createModernResponder()),

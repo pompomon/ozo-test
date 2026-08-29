@@ -92,7 +92,7 @@ export default function App({
   }, [manualDriveEnabled])
 
   useEffect(() => {
-    if (!armed) return
+    if (!motorsBusy) return
     const pressed = new Set<string>()
     const movementKeys = new Set(['w', 'a', 's', 'd', 'arrowup', 'arrowleft', 'arrowdown', 'arrowright'])
     const updateDrive = (): void => {
@@ -128,7 +128,7 @@ export default function App({
       window.removeEventListener('keydown', keyDown)
       window.removeEventListener('keyup', keyUp)
     }
-  }, [armed, behaviorRuntime, controller, manualDriveEnabled, run])
+  }, [behaviorRuntime, controller, manualDriveEnabled, motorsBusy, run])
 
   const status = useMemo(() => {
     switch (snapshot.phase) {
