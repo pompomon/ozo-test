@@ -357,6 +357,21 @@ describe('EvoController', () => {
     await controller.disconnect()
   })
 
+  it('upgrades an in-flight weaker stop when queued sound must be cleared', async () => {
+    const transport = new FakeTransport(EVO_3_PROFILE, createModernResponder())
+    const controller = new EvoController(transport)
+    await controller.connect()
+    await controller.arm()
+
+    const client = (controller as any).client
+    const stopMovement = vi.spyOn(client, 'stopMovement')
+    await Promise.all([controller.stopMotion(), controller.stopMotionAndQueuedSound()])
+
+    expect(stopMovement).toHaveBeenNthCalledWith(1, false, false)
+    expect(stopMovement).toHaveBeenNthCalledWith(2, false, true)
+    await controller.disconnect()
+  })
+
   it('does not log a sound stop when no command was sent', async () => {
     const controller = new EvoController(
       new FakeTransport(EVO_3_PROFILE, createModernResponder()),

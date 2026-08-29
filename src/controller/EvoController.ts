@@ -344,13 +344,26 @@ export class EvoController {
     this.driveAbort?.abort()
     this.patch({ wheels: { left: 0, right: 0 } })
     if (!this.client || !this.transport.connected) return
-    if (cancelOrdinaryRequests) this.client.cancelOrdinaryRequests()
-    if (this.stopPromise) return this.stopPromise
-    this.stopPromise = this.client
-      .stopMovement(cancelOrdinaryRequests, clearQueuedSound)
-      .finally(() => {
-        this.stopPromise = undefined
+
+    const stopMovement = async (): Promise<void> => {
+      if (cancelOrdinaryRequests) this.client!.cancelOrdinaryRequests()
+      await this.client!.stopMovement(cancelOrdinaryRequests, clearQueuedSound)
+    }
+
+    if (this.stopPromise) {
+      if (!cancelOrdinaryRequests && !clearQueuedSound) return this.stopPromise
+      const previousStop = this.stopPromise
+      const chainedStop = previousStop.then(stopMovement, stopMovement)
+      this.stopPromise = chainedStop.finally(() => {
+        if (this.stopPromise === chainedStop) this.stopPromise = undefined
       })
+      return this.stopPromise
+    }
+
+    const currentStop = stopMovement()
+    this.stopPromise = currentStop.finally(() => {
+      if (this.stopPromise === currentStop) this.stopPromise = undefined
+    })
     return this.stopPromise
   }
 
