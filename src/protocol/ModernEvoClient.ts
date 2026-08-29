@@ -159,7 +159,7 @@ export class ModernEvoClient {
   private activeRpcController?: AbortController
   private readonly batchControllers = new Set<AbortController>()
   private priorityBarrier: Promise<void> = Promise.resolve()
-  private readonly expectedLateResponses = new Set<string>()
+  private readonly expectedLateResponses = new Map<string, number>()
   private readonly uncertainMemoryResponseLengths: number[] = []
   private readonly audioExecutions = new Map<number, AudioExecutionTracker>()
   private readonly toneControllers = new Set<AbortController>()
@@ -581,10 +581,10 @@ export class ModernEvoClient {
       void this.transport
         .write(packet, 'control', writeOptions)
         .then(() => {
-          const pending = this.pending.get(key)
-          if (!pending) return
+          if (this.pending.get(key) !== pending) return
           clearTimeout(pending.timer)
           pending.timer = setTimeout(() => {
+            if (this.pending.get(key) !== pending) return
             this.pending.delete(key)
             this.markResponseUncertain(responseMessageId, requestId, packet)
             this.diagnostic(
@@ -595,8 +595,7 @@ export class ModernEvoClient {
           }, timeoutMs)
         })
         .catch((error: unknown) => {
-          const pending = this.pending.get(key)
-          if (!pending) return
+          if (this.pending.get(key) !== pending) return
           clearTimeout(pending.timer)
           this.pending.delete(key)
           pending.reject(asError(error))
@@ -619,6 +618,15 @@ export class ModernEvoClient {
       ].includes(messageId as 105 | 119 | 121)
       const requestId = hasRequestId ? readRequestId(packet) : undefined
       const key = responseKey(messageId, requestId)
+      const expectedLateCount = this.expectedLateResponses.get(key) ?? 0
+      if (expectedLateCount > 0) {
+        if (expectedLateCount === 1) {
+          this.expectedLateResponses.delete(key)
+        } else {
+          this.expectedLateResponses.set(key, expectedLateCount - 1)
+        }
+        return
+      }
       const pending = this.pending.get(key)
       if (!pending) {
         if (
@@ -628,7 +636,6 @@ export class ModernEvoClient {
           this.discardUncertainMemoryResponse(packet)
           return
         }
-        if (this.expectedLateResponses.delete(key)) return
         this.diagnostic(`Ignored unsolicited protocol message ${messageId}`)
         return
       }
@@ -733,9 +740,9 @@ export class ModernEvoClient {
   }
 
   private rememberExpectedLateResponse(key: string): void {
-    this.expectedLateResponses.add(key)
+    this.expectedLateResponses.set(key, (this.expectedLateResponses.get(key) ?? 0) + 1)
     if (this.expectedLateResponses.size <= 100) return
-    const oldest = this.expectedLateResponses.values().next().value
+    const oldest = this.expectedLateResponses.keys().next().value
     if (oldest !== undefined) this.expectedLateResponses.delete(oldest)
   }
 

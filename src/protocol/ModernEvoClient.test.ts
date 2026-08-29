@@ -379,6 +379,73 @@ describe('ModernEvoClient', () => {
     }
   })
 
+  it('does not use a late stop acknowledgment for a newer stop', async () => {
+    vi.useFakeTimers()
+    try {
+      const transport = new FakeTransport(undefined, () => undefined)
+      await transport.connect()
+      const client = new ModernEvoClient(transport)
+      clients.push(client)
+
+      for (let index = 0; index < 2; index += 1) {
+        const timedOutStop = client.stopMovement()
+        const assertion = expect(timedOutStop).rejects.toThrow(/Timed out/)
+        await vi.advanceTimersByTimeAsync(1_001)
+        await assertion
+      }
+
+      let settled = false
+      const currentStop = client.stopMovement().then(() => {
+        settled = true
+      })
+      await vi.waitFor(() => expect(transport.writes).toHaveLength(3))
+      transport.emit(requestResponse(121, 0))
+      await Promise.resolve()
+      expect(settled).toBe(false)
+
+      transport.emit(requestResponse(121, 0))
+      await Promise.resolve()
+      expect(settled).toBe(false)
+
+      transport.emit(requestResponse(121, 0))
+      await currentStop
+      expect(settled).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('ignores a cancelled write failure after a new memory request starts', async () => {
+    let rejectCancelledWrite!: (error: Error) => void
+    const cancelledWrite = new Promise<void>((_, reject) => {
+      rejectCancelledWrite = reject
+    })
+    let memoryWrites = 0
+    const transport = new FakeTransport(undefined, ({ data }) => {
+      if (readMessageId(data) !== 1) return
+      memoryWrites += 1
+      if (memoryWrites === 1) return cancelledWrite
+    })
+    await transport.connect()
+    const client = new ModernEvoClient(transport)
+    clients.push(client)
+
+    const cancelledRead = client.readFirmware()
+    await vi.waitFor(() => expect(memoryWrites).toBe(1))
+    client.cancelOrdinaryRequests()
+    await expect(cancelledRead).rejects.toThrow(/cancelled/)
+
+    const nextRead = client.readFirmware()
+    await vi.waitFor(() => expect(memoryWrites).toBe(2))
+    rejectCancelledWrite(new Error('cancelled write settled late'))
+    await Promise.resolve()
+
+    transport.emit(memoryResponse([0]))
+    await vi.waitFor(() => expect(memoryWrites).toBe(3))
+    transport.emit(memoryResponse([3, 7, 4, 0]))
+    await expect(nextRead).resolves.toEqual({ version: '3.7.4', rawMajor: 3 })
+  })
+
   it('rejects unsolicited malformed notifications without breaking later requests', async () => {
     const diagnostics: string[] = []
     const transport = new FakeTransport(undefined, createModernResponder())

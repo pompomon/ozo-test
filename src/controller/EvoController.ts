@@ -700,13 +700,12 @@ export class EvoController {
   private pauseMotionForSensorRetry(): void {
     const wasMoving = this.targetWheels.left !== 0 || this.targetWheels.right !== 0
     this.reactiveSafetyHealthy = false
-    this.targetWheels = { left: 0, right: 0 }
-    this.driveGeneration += 1
-    this.driveAbort?.abort()
-    this.transport.clearQueued('movement')
-    this.patch({ wheels: { left: 0, right: 0 } })
     if (wasMoving) {
       this.log('warning', 'Reactive safety read timed out; movement paused for retry')
+      void this.stopMotion().catch((error: unknown) => {
+        this.log('error', `Reactive safety stop failed: ${errorMessage(error)}`)
+        void this.emergencyStop('Reactive safety stop was not acknowledged')
+      })
     }
   }
 

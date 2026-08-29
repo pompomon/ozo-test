@@ -168,12 +168,20 @@ describe('EvoController', () => {
       )
       dropNextSafetyRead = true
       controller.setDrive(1, 1)
+      const stopsBeforeRetry = transport.writes
+        .filter((write) => readMessageId(write.data) === 120)
+        .length
 
       await vi.advanceTimersByTimeAsync(751)
       expect(controller.snapshot.wheels).toEqual({ left: 0, right: 0 })
       expect(controller.snapshot.phase).toBe('armed')
       expect(errors).not.toHaveBeenCalled()
       expect(controller.exportDiagnostics()).toContain('movement paused for retry')
+      const retryStops = transport.writes
+        .filter((write) => readMessageId(write.data) === 120)
+        .slice(stopsBeforeRetry)
+      expect(retryStops).toHaveLength(1)
+      expect(retryStops[0].options?.priority).toBe(true)
 
       const movementWrites = (): number => transport.writes
         .filter((write) => readMessageId(write.data) === 104)
