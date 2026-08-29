@@ -354,16 +354,18 @@ export class EvoController {
       if (!cancelOrdinaryRequests && !clearQueuedSound) return this.stopPromise
       const previousStop = this.stopPromise
       const chainedStop = previousStop.then(stopMovement, stopMovement)
-      this.stopPromise = chainedStop.finally(() => {
-        if (this.stopPromise === chainedStop) this.stopPromise = undefined
+      const trackedStop = chainedStop.finally(() => {
+        if (this.stopPromise === trackedStop) this.stopPromise = undefined
       })
+      this.stopPromise = trackedStop
       return this.stopPromise
     }
 
     const currentStop = stopMovement()
-    this.stopPromise = currentStop.finally(() => {
-      if (this.stopPromise === currentStop) this.stopPromise = undefined
+    const trackedStop = currentStop.finally(() => {
+      if (this.stopPromise === trackedStop) this.stopPromise = undefined
     })
+    this.stopPromise = trackedStop
     return this.stopPromise
   }
 

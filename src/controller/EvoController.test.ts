@@ -372,6 +372,21 @@ describe('EvoController', () => {
     await controller.disconnect()
   })
 
+  it('sends another stop after an earlier stop settles', async () => {
+    const transport = new FakeTransport(EVO_3_PROFILE, createModernResponder())
+    const controller = new EvoController(transport)
+    await controller.connect()
+    await controller.arm()
+
+    const client = (controller as any).client
+    const stopMovement = vi.spyOn(client, 'stopMovement')
+    await controller.stopMotion()
+    await controller.stopMotion()
+
+    expect(stopMovement).toHaveBeenCalledTimes(2)
+    await controller.disconnect()
+  })
+
   it('does not log a sound stop when no command was sent', async () => {
     const controller = new EvoController(
       new FakeTransport(EVO_3_PROFILE, createModernResponder()),
