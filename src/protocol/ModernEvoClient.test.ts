@@ -335,6 +335,8 @@ describe('ModernEvoClient', () => {
       expect(transport.writes.filter((write) => readMessageId(write.data) === 118))
         .toHaveLength(1)
     })
+    const toneRequestId = requestIdOf(transport.writes[0].data)
+    expect(transport.writes[0].options?.replaceKey).toBe(`tone:${toneRequestId}`)
     blockReads = true
     const firmware = client.readFirmware()
     await vi.waitFor(() => {
@@ -349,6 +351,30 @@ describe('ModernEvoClient', () => {
     await expect(queuedTone).resolves.toMatchObject({ name: 'RequestCancelledError' })
     expect(transport.writes.filter((write) => readMessageId(write.data) === 118))
       .toHaveLength(1)
+    expect(transport.clearedReplaceKeys).toContain(`tone:${toneRequestId}`)
+  })
+
+  it('clears queued tone writes when stopping all execution', async () => {
+    const transport = new FakeTransport(undefined, ({ data }, fake) => {
+      if (readMessageId(data) === 120) {
+        queueMicrotask(() => fake.emit(requestResponse(121, requestIdOf(data))))
+      }
+    })
+    await transport.connect()
+    const client = new ModernEvoClient(transport)
+    clients.push(client)
+
+    const tone = client.playTone(392, 1_000).catch((error: unknown) => error)
+    await vi.waitFor(() => {
+      expect(transport.writes.filter((write) => readMessageId(write.data) === 118))
+        .toHaveLength(1)
+    })
+    const toneRequestId = requestIdOf(transport.writes[0].data)
+
+    await client.stopMovement(true)
+
+    await expect(tone).resolves.toMatchObject({ name: 'RequestCancelledError' })
+    expect(transport.clearedReplaceKeys).toContain(`tone:${toneRequestId}`)
   })
 
   it('preempts an ordinary RPC with a priority stop', async () => {

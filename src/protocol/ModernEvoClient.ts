@@ -69,6 +69,10 @@ function responseKey(messageId: number, requestId?: number): string {
   return `${messageId}:${requestId ?? 'single'}`
 }
 
+function toneQueueKey(requestId: number): string {
+  return `tone:${requestId}`
+}
+
 function asError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value))
 }
@@ -260,6 +264,9 @@ export class ModernEvoClient {
     if (cancelOrdinaryRequests) {
       this.cancelOrdinaryRequests()
       for (const controller of this.toneControllers) controller.abort()
+      for (const requestId of this.activeSoundRequestIds) {
+        this.transport.clearQueued(toneQueueKey(requestId))
+      }
     }
     this.transport.clearQueued('movement')
     await this.stopExecution(0, true)
@@ -311,7 +318,7 @@ export class ModernEvoClient {
           encodePlayTone(requestId, frequencyHz, durationMs),
           MODERN_MESSAGE.playToneResponse,
           requestId,
-          undefined,
+          { replaceKey: toneQueueKey(requestId) },
           durationMs + AUDIO_COMPLETION_GRACE_MS,
           'tone',
           signal,
@@ -334,6 +341,7 @@ export class ModernEvoClient {
     const requestIds = [...this.activeSoundRequestIds]
     if (requestIds.length === 0) return false
     for (const requestId of requestIds) {
+      this.transport.clearQueued(toneQueueKey(requestId))
       await this.stopExecution(requestId, true)
       this.activeSoundRequestIds.delete(requestId)
       this.audioExecutions.get(requestId)?.reject(new RequestCancelledError())
