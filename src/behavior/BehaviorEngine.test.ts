@@ -65,7 +65,7 @@ describe('BehaviorEngine', () => {
     })?.transition).toMatchObject({ from: 'SCARED', to: 'ANGRY' })
   })
 
-  it('preserves stationary dance timing and enables bounded movement only when configured', () => {
+  it('preserves stationary choreography timing and enables bounded movement only when configured', () => {
     const clock = testClock()
     const stationary = new BehaviorEngine(
       createBehaviorConfig(),
@@ -73,7 +73,17 @@ describe('BehaviorEngine', () => {
       new SeededRandom(7),
     )
     stationary.start()
-    const stationaryDance = stationary.handleEvent({ type: 'DANCE_REQUESTED', at: 1 })
+    clock.value = 20_001
+    const stationaryCurious = stationary.handleEvent({ type: 'TICK', at: clock.value })
+    expect(stationaryCurious?.actions.filter((action) => action.type === 'DRIVE')).toEqual([])
+    expect(stationaryCurious?.actions
+      .filter((action) => action.type === 'WAIT')
+      .map((action) => action.durationMs)).toEqual([650, 450, 420, 650])
+
+    const stationaryDance = stationary.handleEvent({
+      type: 'DANCE_REQUESTED',
+      at: clock.value + 1,
+    })
     expect(stationaryDance?.actions.filter((action) => action.type === 'DRIVE')).toEqual([])
     expect(stationaryDance?.actions
       .filter((action) => action.type === 'WAIT')
