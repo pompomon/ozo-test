@@ -9,7 +9,11 @@ import {
   missingCapabilities,
   type ProtocolProfile,
 } from '../protocol/profile.ts'
-import type { EvoTelemetry, ReactiveSensors } from '../protocol/telemetry.ts'
+import type {
+  EvoTelemetry,
+  ReactiveSafetySensors,
+  ReactiveSensors,
+} from '../protocol/telemetry.ts'
 import { ControlLock } from '../safety/ControlLock.ts'
 import type { EvoTransport } from '../transport/EvoTransport.ts'
 import { WebBluetoothTransport, webBluetoothSupport } from '../transport/WebBluetoothTransport.ts'
@@ -60,6 +64,7 @@ const DRIVE_REFRESH_MS = 100
 const DRIVE_WATCHDOG_MS = 250
 const DRIVE_TIMEOUT_FAILSAFE_THRESHOLD = 2
 const TELEMETRY_REFRESH_MS = 2_000
+const REACTIVE_BUTTON_REFRESH_MS = 1_000
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
@@ -81,10 +86,14 @@ export class EvoController {
   private wakeLock?: WakeLockSentinel
   private telemetryTimer?: ReturnType<typeof setInterval>
   private reactiveSensorTimer?: ReturnType<typeof setTimeout>
+  private reactiveButtonTimer?: ReturnType<typeof setTimeout>
+  private reactiveSensorAbort?: AbortController
+  private reactiveSafetyHealthy = true
   private reactiveSensorGeneration = 0
   private telemetryInFlight = false
   private sensorReadChain: Promise<void> = Promise.resolve()
   private driveLoopActive = false
+  private driveAbort?: AbortController
   private driveGeneration = 0
   private armingGeneration = 0
   private targetWheels: WheelSpeeds = { left: 0, right: 0 }
@@ -279,7 +288,7 @@ export class EvoController {
     this.patch({ phase: 'stopping', wheels: { left: 0, right: 0 } })
     let stopFailure: string | undefined
     try {
-      await this.stopMotion()
+      await this.stopMotion(true)
     } catch (error) {
       stopFailure = errorMessage(error)
       this.log('error', `Stop command failed while disarming: ${stopFailure}`)
@@ -307,6 +316,7 @@ export class EvoController {
 
   setDrive(left: number, right: number): void {
     if (this.snapshotValue.phase !== 'armed') return
+    if (this.reactiveSensorAbort && !this.reactiveSafetyHealthy) return
     const wheels = normalizeWheelSpeeds(left, right)
     this.targetWheels = wheels
     this.patch({ wheels })
@@ -317,15 +327,45 @@ export class EvoController {
     void this.runDriveLoop()
   }
 
-  async stopMotion(): Promise<void> {
+  async stopMotion(cancelOrdinaryRequests = false): Promise<void> {
+    return this.stopMotionInternal(cancelOrdinaryRequests, cancelOrdinaryRequests)
+  }
+
+  async stopMotionAndQueuedSound(): Promise<void> {
+    return this.stopMotionInternal(false, true)
+  }
+
+  private async stopMotionInternal(
+    cancelOrdinaryRequests: boolean,
+    clearQueuedSound: boolean,
+  ): Promise<void> {
     this.targetWheels = { left: 0, right: 0 }
     this.driveGeneration += 1
+    this.driveAbort?.abort()
     this.patch({ wheels: { left: 0, right: 0 } })
     if (!this.client || !this.transport.connected) return
-    if (this.stopPromise) return this.stopPromise
-    this.stopPromise = this.client.stopMovement().finally(() => {
-      this.stopPromise = undefined
+
+    const stopMovement = async (): Promise<void> => {
+      if (cancelOrdinaryRequests) this.client!.cancelOrdinaryRequests()
+      await this.client!.stopMovement(cancelOrdinaryRequests, clearQueuedSound)
+    }
+
+    if (this.stopPromise) {
+      if (!cancelOrdinaryRequests && !clearQueuedSound) return this.stopPromise
+      const previousStop = this.stopPromise
+      const chainedStop = previousStop.then(stopMovement, stopMovement)
+      const trackedStop = chainedStop.finally(() => {
+        if (this.stopPromise === trackedStop) this.stopPromise = undefined
+      })
+      this.stopPromise = trackedStop
+      return this.stopPromise
+    }
+
+    const currentStop = stopMovement()
+    const trackedStop = currentStop.finally(() => {
+      if (this.stopPromise === trackedStop) this.stopPromise = undefined
     })
+    this.stopPromise = trackedStop
     return this.stopPromise
   }
 
@@ -346,7 +386,7 @@ export class EvoController {
       this.patch({ phase: 'stopping', wheels: { left: 0, right: 0 } })
     }
     try {
-      await this.stopMotion()
+      await this.stopMotion(true)
     } catch (error) {
       stopFailure = errorMessage(error)
       this.log('error', `Stop command failed: ${stopFailure}`)
@@ -394,16 +434,19 @@ export class EvoController {
     this.log('info', `Updated LEDs (mask 0x${mask.toString(16)})`)
   }
 
-  async playTone(frequencyHz: number, durationMs: number): Promise<void> {
+  async playTone(
+    frequencyHz: number,
+    durationMs: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
     if (!this.canUse('sound') || !this.client) return
-    await this.client.playTone(frequencyHz, durationMs)
+    await this.client.playTone(frequencyHz, durationMs, signal)
     this.log('info', `Played ${frequencyHz} Hz tone`)
   }
 
   async stopSound(): Promise<void> {
     if (!this.client) return
-    await this.client.stopSound()
-    this.log('info', 'Stopped sound')
+    if (await this.client.stopSound()) this.log('info', 'Stopped sound')
   }
 
   async refreshTelemetry(): Promise<void> {
@@ -433,6 +476,35 @@ export class EvoController {
     return sensors
   }
 
+  private async readReactiveSafetySensors(
+    signal: AbortSignal,
+    onRetry: () => void,
+  ): Promise<ReactiveSafetySensors> {
+    const client = this.client
+    if (!client || !this.transport.connected) {
+      throw new Error('Evo is not connected')
+    }
+    const sensors = await this.runSensorRead(
+      () => client.readReactiveSafetySensors(signal, onRetry),
+    )
+    if (this.client !== client || !this.transport.connected) {
+      throw new Error('Evo disconnected during sensor sampling')
+    }
+    return sensors
+  }
+
+  private async readReactiveButton(signal: AbortSignal): Promise<EvoTelemetry['button']> {
+    const client = this.client
+    if (!client || !this.transport.connected) {
+      throw new Error('Evo is not connected')
+    }
+    const button = await this.runSensorRead(() => client.readReactiveButton(signal))
+    if (this.client !== client || !this.transport.connected) {
+      throw new Error('Evo disconnected during button sampling')
+    }
+    return button
+  }
+
   async startReactiveSensorPolling(
     handler: ReactiveSensorHandler,
     onError: ReactiveSensorErrorHandler,
@@ -447,21 +519,43 @@ export class EvoController {
     const interval = Math.max(MIN_REACTIVE_SENSOR_INTERVAL_MS, Math.round(intervalMs))
     this.stopTelemetry()
     this.stopReactiveSensorPolling()
+    this.client.cancelOrdinaryRequests()
     const generation = this.reactiveSensorGeneration
+    const pollingController = new AbortController()
+    this.reactiveSensorAbort = pollingController
+    this.reactiveSafetyHealthy = false
+    let latestButton = this.snapshotValue.telemetry?.button ?? {
+      press: 'Release',
+      timestamp: 0,
+    }
 
-    const poll = async (): Promise<void> => {
+    const asReactiveSensors = (safety: ReactiveSafetySensors): ReactiveSensors => ({
+      ...safety,
+      button: latestButton,
+    })
+
+    const pollSafety = async (): Promise<void> => {
       if (generation !== this.reactiveSensorGeneration) return
       try {
-        const sensors = await this.readReactiveSensors()
+        const sensors = await this.readReactiveSafetySensors(
+          pollingController.signal,
+          () => this.pauseMotionForSensorRetry(),
+        )
         if (
           generation === this.reactiveSensorGeneration &&
           this.snapshotValue.phase === 'armed' &&
           this.transport.connected
         ) {
-          handler(sensors)
+          this.reactiveSafetyHealthy = true
+          handler(asReactiveSensors(sensors))
         }
       } catch (error) {
-        if (generation === this.reactiveSensorGeneration && this.transport.connected) {
+        if (
+          generation === this.reactiveSensorGeneration &&
+          this.transport.connected &&
+          !pollingController.signal.aborted
+        ) {
+          this.pauseMotionForSensorRetry()
           onError(error instanceof Error ? error : new Error(errorMessage(error)))
         }
       } finally {
@@ -471,14 +565,49 @@ export class EvoController {
           this.transport.connected
         ) {
           this.reactiveSensorTimer = setTimeout(() => {
-            void poll()
+            void pollSafety()
           }, interval)
         }
       }
     }
 
+    const pollButton = async (): Promise<void> => {
+      if (generation !== this.reactiveSensorGeneration) return
+      try {
+        const button = await this.readReactiveButton(pollingController.signal)
+        if (
+          generation === this.reactiveSensorGeneration &&
+          this.snapshotValue.phase === 'armed' &&
+          this.transport.connected
+        ) {
+          latestButton = button
+        }
+      } catch (error) {
+        if (
+          generation === this.reactiveSensorGeneration &&
+          this.transport.connected &&
+          !pollingController.signal.aborted
+        ) {
+          this.log('warning', `Reactive button read failed: ${errorMessage(error)}`)
+        }
+      } finally {
+        if (
+          generation === this.reactiveSensorGeneration &&
+          this.snapshotValue.phase === 'armed' &&
+          this.transport.connected
+        ) {
+          this.reactiveButtonTimer = setTimeout(() => {
+            void pollButton()
+          }, REACTIVE_BUTTON_REFRESH_MS)
+        }
+      }
+    }
+
     try {
-      const sensors = await this.readReactiveSensors()
+      const sensors = await this.readReactiveSafetySensors(
+        pollingController.signal,
+        () => this.pauseMotionForSensorRetry(),
+      )
       if (
         generation !== this.reactiveSensorGeneration ||
         this.snapshotValue.phase !== 'armed' ||
@@ -486,11 +615,18 @@ export class EvoController {
       ) {
         throw new Error('Reactive sensor polling was interrupted')
       }
-      handler(sensors)
+      this.reactiveSafetyHealthy = true
+      handler(asReactiveSensors(sensors))
     } catch (error) {
+      const interrupted =
+        pollingController.signal.aborted ||
+        generation !== this.reactiveSensorGeneration
       if (generation === this.reactiveSensorGeneration) {
         this.stopReactiveSensorPolling()
         if (this.client && this.transport.connected) this.startTelemetry()
+      }
+      if (interrupted) {
+        throw new Error('Reactive sensor polling was interrupted')
       }
       throw error
     }
@@ -502,8 +638,11 @@ export class EvoController {
       throw new Error('Reactive sensor polling was interrupted')
     }
     this.reactiveSensorTimer = setTimeout(() => {
-      void poll()
+      void pollSafety()
     }, interval)
+    this.reactiveButtonTimer = setTimeout(() => {
+      void pollButton()
+    }, REACTIVE_BUTTON_REFRESH_MS)
 
     return () => {
       if (generation !== this.reactiveSensorGeneration) return
@@ -530,6 +669,8 @@ export class EvoController {
     if (this.driveLoopActive || !this.client) return
     this.driveLoopActive = true
     const generation = ++this.driveGeneration
+    const driveController = new AbortController()
+    this.driveAbort = driveController
     let consecutiveTimeouts = 0
     try {
       while (
@@ -542,7 +683,12 @@ export class EvoController {
           this.snapshotValue.maximumSpeed,
         )
         try {
-          await this.client.setWheels(wheels.left, wheels.right, DRIVE_WATCHDOG_MS)
+          await this.client.setWheels(
+            wheels.left,
+            wheels.right,
+            DRIVE_WATCHDOG_MS,
+            driveController.signal,
+          )
           consecutiveTimeouts = 0
         } catch (error) {
           if (isMovementSupersededError(error)) {
@@ -567,6 +713,7 @@ export class EvoController {
       this.log('error', `Drive command failed: ${errorMessage(error)}`)
       await this.emergencyStop('Drive communication failed')
     } finally {
+      if (this.driveAbort === driveController) this.driveAbort = undefined
       this.driveLoopActive = false
       if (
         this.snapshotValue.phase === 'armed' &&
@@ -575,6 +722,18 @@ export class EvoController {
       ) {
         void this.runDriveLoop()
       }
+    }
+  }
+
+  private pauseMotionForSensorRetry(): void {
+    const wasMoving = this.targetWheels.left !== 0 || this.targetWheels.right !== 0
+    this.reactiveSafetyHealthy = false
+    if (wasMoving) {
+      this.log('warning', 'Reactive safety read timed out; movement paused for retry')
+      void this.stopMotion().catch((error: unknown) => {
+        this.log('error', `Reactive safety stop failed: ${errorMessage(error)}`)
+        void this.emergencyStop('Reactive safety stop was not acknowledged')
+      })
     }
   }
 
@@ -599,8 +758,13 @@ export class EvoController {
 
   private stopReactiveSensorPolling(): void {
     this.reactiveSensorGeneration += 1
+    this.reactiveSensorAbort?.abort()
+    this.reactiveSensorAbort = undefined
+    this.reactiveSafetyHealthy = true
     if (this.reactiveSensorTimer) clearTimeout(this.reactiveSensorTimer)
     this.reactiveSensorTimer = undefined
+    if (this.reactiveButtonTimer) clearTimeout(this.reactiveButtonTimer)
+    this.reactiveButtonTimer = undefined
   }
 
   private handleUnexpectedDisconnect(reason?: Error): void {

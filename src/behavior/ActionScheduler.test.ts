@@ -5,6 +5,7 @@ import type { RobotAction, RobotActionPort } from './types.ts'
 
 class FakeActionPort implements RobotActionPort {
   readonly executed: RobotAction[] = []
+  readonly cleanupForces: boolean[] = []
   cleanups = 0
   failure?: Error
 
@@ -14,7 +15,8 @@ class FakeActionPort implements RobotActionPort {
     if (action.type === 'WAIT') await abortableDelay(action.durationMs, signal)
   }
 
-  async cleanup(): Promise<void> {
+  async cleanup(force: boolean): Promise<void> {
+    this.cleanupForces.push(force)
     this.cleanups += 1
   }
 }
@@ -33,6 +35,7 @@ describe('ActionScheduler', () => {
       await scheduler.cancel()
       expect(await active.completion).toBe('cancelled')
       expect(port.cleanups).toBe(1)
+      expect(port.cleanupForces).toEqual([true])
     } finally {
       vi.useRealTimers()
     }
@@ -50,6 +53,7 @@ describe('ActionScheduler', () => {
       expect(await next.completion).toBe('completed')
       expect(port.executed.at(-1)?.type).toBe('STOP_MOTION')
       expect(port.cleanups).toBe(2)
+      expect(port.cleanupForces).toEqual([true, false])
     } finally {
       vi.useRealTimers()
     }
@@ -62,6 +66,7 @@ describe('ActionScheduler', () => {
     const ticket = scheduler.schedule([{ type: 'STOP_MOTION' }], 10)
     await expect(ticket.completion).rejects.toThrow('action failed')
     expect(port.cleanups).toBe(1)
+    expect(port.cleanupForces).toEqual([true])
   })
 
   it('reports cancellation that occurs during cleanup', async () => {
@@ -70,7 +75,11 @@ describe('ActionScheduler', () => {
       releaseCleanup = resolve
     })
     const port = new FakeActionPort()
-    port.cleanup = vi.fn(() => cleanup)
+    port.cleanup = vi.fn((force) => {
+      port.cleanupForces.push(force)
+      port.cleanups += 1
+      return cleanup
+    })
     const scheduler = new ActionScheduler(port)
     const ticket = scheduler.schedule([{ type: 'STOP_MOTION' }], 10)
     await vi.waitFor(() => expect(port.cleanup).toHaveBeenCalled())
@@ -80,5 +89,6 @@ describe('ActionScheduler', () => {
 
     await cancellation
     expect(await ticket.completion).toBe('cancelled')
+    expect(port.cleanupForces).toEqual([false, true])
   })
 })

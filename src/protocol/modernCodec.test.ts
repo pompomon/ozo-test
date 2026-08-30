@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   assertCallSucceeded,
+  decodeAudioExecutionState,
   decodeMemReadResponse,
   decodeS8_24,
   encodeMemRead,
@@ -9,6 +10,7 @@ import {
   encodeSetLed,
   encodeStopExecution,
   encodeVelocity,
+  EXECUTION_STATE,
   readMessageId,
 } from './modernCodec.ts'
 
@@ -38,6 +40,15 @@ describe('modern Evo protocol codec', () => {
     }
   })
 
+  it('decodes the official audio execution-state event', () => {
+    expect(decodeAudioExecutionState(
+      Uint8Array.of(3, 1, 1, 0, 0, 2, EXECUTION_STATE.finishedNormal),
+    )).toEqual({
+      requestId: 0x0200_0001,
+      executionState: EXECUTION_STATE.finishedNormal,
+    })
+  })
+
   it('validates ranges before encoding', () => {
     expect(() => encodeMemRead(-1, 4)).toThrow(RangeError)
     expect(() => encodeMemRead(0, 16)).toThrow(RangeError)
@@ -49,6 +60,9 @@ describe('modern Evo protocol codec', () => {
     expect(() => readMessageId(Uint8Array.of(1))).toThrow(RangeError)
     expect(() => decodeMemReadResponse(Uint8Array.of(2, 0, 0))).toThrow(RangeError)
     expect(() => decodeMemReadResponse(Uint8Array.of(3, 0, 0, 0, 0))).toThrow()
+    expect(() => decodeAudioExecutionState(Uint8Array.of(3, 1, 0))).toThrow(RangeError)
+    expect(() => decodeAudioExecutionState(Uint8Array.of(3, 1, 1, 0, 0, 2, 8)))
+      .toThrow(/state 8/)
     expect(() => assertCallSucceeded(Uint8Array.of(111, 0, 2), 111)).toThrow(/status 2/)
   })
 
@@ -59,4 +73,3 @@ describe('modern Evo protocol codec', () => {
     expect([...decoded.data]).toEqual([7, 8, 9])
   })
 })
-

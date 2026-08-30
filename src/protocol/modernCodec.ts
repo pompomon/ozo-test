@@ -13,7 +13,26 @@ export const MODERN_MESSAGE = {
   playToneResponse: 119,
   stopExecutionRequest: 120,
   stopExecutionResponse: 121,
+  audioExecutionState: 259,
 } as const
+
+export const EXECUTION_STATE = {
+  running: 0,
+  finishedNormal: 1,
+  finishedForced: 2,
+  notExecuted: 3,
+  fileNotFound: 4,
+  invalidRequest: 5,
+  corruptedInput: 6,
+  invalidCalibration: 7,
+} as const
+
+export type ExecutionState = (typeof EXECUTION_STATE)[keyof typeof EXECUTION_STATE]
+
+export interface AudioExecutionState {
+  readonly requestId: number
+  readonly executionState: ExecutionState
+}
 
 function assertIntegerInRange(value: number, min: number, max: number, name: string): void {
   if (!Number.isInteger(value) || value < min || value > max) {
@@ -127,6 +146,29 @@ export function encodeStopExecution(requestId: number): Uint8Array {
   const { bytes, view } = createPacket(6, MODERN_MESSAGE.stopExecutionRequest)
   view.setUint32(2, requestId, true)
   return bytes
+}
+
+export function decodeAudioExecutionState(packet: Uint8Array): AudioExecutionState {
+  if (packet.length !== 7) {
+    throw new RangeError('Audio execution state must contain exactly 7 bytes')
+  }
+  const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength)
+  if (view.getUint16(0, true) !== MODERN_MESSAGE.audioExecutionState) {
+    throw new Error('Unexpected audio execution state message ID')
+  }
+  const executionState = packet[6]
+  if (!Object.values(EXECUTION_STATE).includes(executionState as ExecutionState)) {
+    throw new RangeError(`Invalid audio execution state ${executionState}`)
+  }
+  return {
+    requestId: view.getUint32(2, true),
+    executionState: executionState as ExecutionState,
+  }
+}
+
+export function executionStateName(state: ExecutionState): string {
+  const entry = Object.entries(EXECUTION_STATE).find(([, value]) => value === state)
+  return entry?.[0] ?? `unknown (${state})`
 }
 
 export function readMessageId(packet: Uint8Array): number {

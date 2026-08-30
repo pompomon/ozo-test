@@ -4,6 +4,7 @@ import { EvoBehaviorAdapter, type BehaviorController } from './EvoBehaviorAdapte
 class FakeBehaviorController implements BehaviorController {
   readonly drives: { left: number; right: number }[] = []
   stops = 0
+  stopsWithQueuedSound = 0
   soundStops = 0
   lights = 0
   tones = 0
@@ -14,6 +15,10 @@ class FakeBehaviorController implements BehaviorController {
 
   async stopMotion(): Promise<void> {
     this.stops += 1
+  }
+
+  async stopMotionAndQueuedSound(): Promise<void> {
+    this.stopsWithQueuedSound += 1
   }
 
   async setLights(): Promise<void> {
@@ -43,6 +48,8 @@ describe('EvoBehaviorAdapter', () => {
       await execution
       expect(controller.drives).toEqual([{ left: 0.3, right: -0.3 }])
       expect(controller.stops).toBe(1)
+      await adapter.cleanup(false)
+      expect(controller.stops).toBe(1)
     } finally {
       vi.useRealTimers()
     }
@@ -59,5 +66,18 @@ describe('EvoBehaviorAdapter', () => {
     cancellation.abort()
     await expect(execution).rejects.toMatchObject({ name: 'AbortError' })
     expect(controller.stops).toBe(1)
+  })
+
+  it('skips routine cleanup traffic but keeps forced cleanup unconditional', async () => {
+    const controller = new FakeBehaviorController()
+    const adapter = new EvoBehaviorAdapter(controller)
+
+    await adapter.cleanup(false)
+    expect(controller.stops).toBe(0)
+    expect(controller.soundStops).toBe(0)
+
+    await adapter.cleanup(true)
+    expect(controller.stopsWithQueuedSound).toBe(1)
+    expect(controller.soundStops).toBe(1)
   })
 })

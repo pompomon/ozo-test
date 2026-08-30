@@ -65,6 +65,42 @@ describe('BehaviorEngine', () => {
     })?.transition).toMatchObject({ from: 'SCARED', to: 'ANGRY' })
   })
 
+  it('preserves stationary choreography timing and enables bounded movement only when configured', () => {
+    const clock = testClock()
+    const stationary = new BehaviorEngine(
+      createBehaviorConfig(),
+      clock,
+      new SeededRandom(7),
+    )
+    stationary.start()
+    clock.value = 20_001
+    const stationaryCurious = stationary.handleEvent({ type: 'TICK', at: clock.value })
+    expect(stationaryCurious?.actions.filter((action) => action.type === 'DRIVE')).toEqual([])
+    expect(stationaryCurious?.actions
+      .filter((action) => action.type === 'WAIT')
+      .map((action) => action.durationMs)).toEqual([650, 450, 420, 650])
+
+    const stationaryDance = stationary.handleEvent({
+      type: 'DANCE_REQUESTED',
+      at: clock.value + 1,
+    })
+    expect(stationaryDance?.actions.filter((action) => action.type === 'DRIVE')).toEqual([])
+    expect(stationaryDance?.actions
+      .filter((action) => action.type === 'WAIT')
+      .map((action) => action.durationMs)).toEqual([380, 380, 350, 250])
+
+    const moving = new BehaviorEngine(
+      createBehaviorConfig({ movementEnabled: true }),
+      clock,
+      new SeededRandom(7),
+    )
+    moving.start()
+    const movingDance = moving.handleEvent({ type: 'DANCE_REQUESTED', at: 1 })
+    expect(movingDance?.actions
+      .filter((action) => action.type === 'DRIVE')
+      .map((action) => action.durationMs)).toEqual([380, 380, 350])
+  })
+
   it('enters bored and sleeping states based only on external inactivity', () => {
     const clock = testClock()
     const config = createBehaviorConfig({
